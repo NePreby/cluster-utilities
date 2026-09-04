@@ -236,6 +236,7 @@ Move caches off `$HOME`: `export XDG_CACHE_HOME=/scratch/$USER/.cache; export PI
   git annex get <only the files you need>
   ```
   Unfetched annex files appear as **broken symlinks** — a job that hits one fails fast with `FileNotFoundError`. Verify what's actually materialised before a sweep: `find -L <dir> -name "<pattern>" -type f` (`-L` follows symlinks; `-type f` drops the broken ones).
+- **Upload throughput is dominated by *your* location, not the cluster.** The same `rsync` to `/scratch` is fast from a well-connected on-campus link and noticeably slower from home or a lab. Measured 2026-09-04 from **Mila**: ~1.5 GB per subject in ~2 min (~13 MB/s effective, post-compression) into Fir `/scratch`; the same transfers are much slower from home/lab. Only measured on Fir so far, but this is a client-link effect and likely **general to Alliance clusters**. For large datasets, transfer from the fastest link you have, or use **Globus** (per-cluster endpoint), which is far less sensitive to your local connection. `rsync`/`scp` go through the login node.
 
 ### B.9 The canonical agent-driven loop
 1. **Local:** code, test, commit, push to origin.
@@ -278,6 +279,8 @@ Never delete shared files without checking ownership and the project README. Arc
 | **Trillium**: job runs with **default** parameters, ignoring the env vars you set on the `sbatch` line (`VAR=x sbatch …`) | Trillium's wrapper forces `--export=NONE`, so the submitting shell's env (including `$USER`) does **not** reach the job | Pass them explicitly: `sbatch --export=ALL,VAR=x,VAR2=y script.sh`. Values with spaces are fine inside one quoted `--export`. Without `--export=ALL`, even `$USER`/`$SCRATCH`-derived paths can come up empty. |
 | **Trillium** debug job: `Requested time limit is invalid (missing or exceeds some limit)` | The **debug** GPU partition caps walltime at **2 h** (1 GPU); your script's `--time` is longer | Override on the CLI for tests: `sbatch -p debug --time=00:30:00 …`. Use `debugjob -g 1` for a 2 h interactive GPU session instead. |
 | Alliance wheelhouse: `ImportError: cannot import name 'sph_harm' from 'scipy.special'` (via `import mne`) | The wheelhouse's newest **mne** (1.9.0) imports `sph_harm`, which **scipy ≥1.16 removed** | Pin `scipy==1.14.1` in the venv (still has `sph_harm`, compatible with mne 1.9.0; uv/pip resolves numpy down to a matching 2.2.x that torch still accepts). General lesson: when the wheelhouse caps a pure-Python package at an old version, pin its compiled deps to that era. |
+| `rsync` over ssh dies with `error in rsync protocol data stream (code 12)` | You put **`ssh -n`** in rsync's `-e` transport; `-n` redirects ssh stdin to `/dev/null`, which kills rsync's bidirectional data stream | Drop `-n` from `-e "ssh …"`. `-n` is only for *standalone* `ssh cmd` (to stop it eating a loop's stdin), never for the rsync/scp transport. |
+| A `while read … < list` loop that runs `ssh`/`rsync` inside **stops after the first item** (rest of the list silently skipped) | `ssh` (and rsync-over-ssh) reads from the loop's stdin and consumes the remaining lines of `list`, so `read` hits EOF | Read the list from a **separate FD**: `while IFS= read -r x <&3; do … ; done 3< list`. (Alternatively `</dev/null` or `-n` on *standalone* ssh calls — but never on the rsync transport, per the row above.) |
 
 ---
 
