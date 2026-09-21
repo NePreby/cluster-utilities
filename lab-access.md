@@ -17,16 +17,20 @@ Host *
 Every alias below inherits this, so the first connection opens a background master socket and every
 later `ssh`/`rsync`/`scp` to that host reuses it — no re-auth, instant reconnects.
 
-## The lab workstation
+## The lab workstation — LKJ008-psy
 
-Tailscale host, **key-based (no Duo/MFA)**. Add this alias:
+Tailscale host, **password auth**: the SSH key was removed so a second person can reach it via a
+Tailscale share (keys were causing trouble there), so no `ssh-copy-id` / keyless login. Alias:
 
 ```sshconfig
-Host lab
+Host lab lkj008 lkj008-psy
   HostName 100.86.65.72     # Tailscale IP (tailnet-private)
   User yorguin
   # inherits ControlMaster/ControlPersist from Host *
 ```
+
+First `ssh lab` prompts for the password and opens the multiplexed master; after that,
+`ssh -o BatchMode=yes lab` (and rsync/scp, and agents) reuse the socket with no re-prompt.
 
 Then it behaves exactly like a cluster alias:
 
