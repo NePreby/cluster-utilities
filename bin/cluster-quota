@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Space + file-count quota for every cluster, in one table.
+
+Runs each cluster's `diskusage_report` over the shared SSH master (`ssh -o BatchMode=yes`, so it fails
+fast instead of hanging on Duo), parses it, and flags anything near or over quota — space AND inodes,
+per filesystem and per allocation (def-/rrg-/aip-kjerbi). Read-only; `diskusage_report` is a quick
+login-node lookup of the nightly-updated quota DB, not a filesystem scan.
+
+  cluster-quota                       # default clusters
+  cluster-quota fir narval            # just these
+  cluster-quota --only rrg-kjerbi     # only rows for one allocation (project/nearline)
+  cluster-quota --raw                 # also print each cluster's raw diskusage_report
+
+Masters down -> `cluster-login <host>` first. trillium-gpu shares trillium's filesystems (skip it).
+TamIA / Killarney / Vulcan (aip-kjerbi) need an ssh alias in ~/.ssh/config before they can be listed here.
+"""
+import argparse
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+DEFAULT_HOSTS = ["fir", "narval", "rorqual", "nibi", "trillium"]
+WARN, CRIT = 80.0, 95.0  # diskusage_report itself warns at 95%
+
+ROW = re.compile(
+    r"^\s*(?P<fs>/\w+) \((?P<kind>\w+) (?P<owner>[\w.-]+)\)\s+(?:->\s+)?"
+    r"(?P<su>[\d.]+\s*[KMGTP]?i?B)/\s*(?P<sq>[\d.]+\s*[KMGTP]?i?B)\s+"
+    r"(?P<fu>[\d.]+\s*[KMG]?)\s*/\s*(?P<fq>[\d.]+\s*[KMG]?)\s*$"
+)
+SIZE = {"": 1, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15,
+        "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50}
+
+
+def to_bytes(s):
+    m = re.fullmatch(r"([\d.]+)\s*([KMGTP]?i?)B", s.strip())
+    return float(m.group(1)) * SIZE[m.group(2)]
+
+
+def to_count(s):
+    m = re.fullmatch(r"([\d.]+)\s*([KMG]?)", s.strip())
+    return float(m.group(1)) * SIZE[m.group(2)]
+
+
+def pct(used, quota):
+    return 100.0 * used / quota if quota else 0.0
+
+
+def fetch(host):
+    try:
+        p = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "bash -lc diskusage_report"],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return host, None, "timed out (login node slow? try `cluster-status`)"
+    if p.returncode == 255 or "Permission denied" in p.stderr:
+        return host, None, f"ssh failed -> cluster-login {host}"
+    return host, p.stdout, None
+
+
+def parse(text):
+    rows = []
+    for line in text.splitlines():
+        m = ROW.match(line)
+        if not m:
+            continue
+        d = m.groupdict()
+        rows.append({
+            "fs": d["fs"], "kind": d["kind"], "owner": d["owner"],
+            "su": d["su"].replace(" ", ""), "sq": d["sq"].replace(" ", ""),
+            "fu": d["fu"].strip(), "fq": d["fq"].strip(),
+            "sp": pct(to_bytes(d["su"]), to_bytes(d["sq"])),
+            "fp": pct(to_count(d["fu"]), to_count(d["fq"])),
+        })
+    return rows
+
+
+def flag(p):
+    if p >= 100: return "OVER"
+    if p >= CRIT: return "CRIT"
+    if p >= WARN: return "warn"
+    return ""
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("hosts", nargs="*", default=DEFAULT_HOSTS)
+    ap.add_argument("--only", metavar="ALLOC", help="only project/nearline rows of this allocation, e.g. rrg-kjerbi")
+    ap.add_argument("--raw", action="store_true", help="also print the raw diskusage_report output")
+    a = ap.parse_args()
+
+    color = sys.stdout.isatty()
+    paint = {"OVER": "\033[1;31m", "CRIT": "\033[31m", "warn": "\033[33m"}
+
+    def c(text, f):
+        return f"{paint[f]}{text}\033[0m" if color and f in paint else text
+
+    with ThreadPoolExecutor(len(a.hosts)) as ex:
+        results = list(ex.map(fetch, a.hosts))
+
+    hdr = f"{'cluster':<10} {'filesystem':<10} {'owner':<20} {'space used/quota':>22} {'%':>5}   {'files used/quota':>17} {'%':>5}  flag"
+    print(hdr)
+    print("-" * len(hdr))
+    worst = []
+    for host, out, err in results:
+        if err:
+            print(f"{host:<10} {c(err, 'CRIT')}")
+            continue
+        rows = parse(out)
+        if a.only:
+            rows = [r for r in rows if r["owner"] == a.only and r["kind"] != "user"]
+        if not rows:
+            print(f"{host:<10} (no matching rows; rerun with --raw)")
+        for r in rows:
+            f = flag(max(r["sp"], r["fp"]))
+            owner = f"{r['kind']} {r['owner']}"
+            space = f"{r['su']} / {r['sq']}"
+            files = f"{r['fu']} / {r['fq']}"
+            sp = c(f"{r['sp']:5.0f}", flag(r["sp"]))
+            fp = c(f"{r['fp']:5.0f}", flag(r["fp"]))
+            print(f"{host:<10} {r['fs']:<10} {owner:<20} {space:>22} {sp}   {files:>17} {fp}  {c(f, f)}")
+            if f:
+                worst.append((max(r["sp"], r["fp"]), host, r, f))
+        if a.raw:
+            print(out)
+    if worst:
+        print(f"\nNear/over quota (space or files >= {WARN:.0f}%):")
+        for p, host, r, f in sorted(worst, key=lambda w: -w[0]):
+            what = []
+            if flag(r["sp"]): what.append(f"space {r['sp']:.0f}%")
+            if flag(r["fp"]): what.append(f"files {r['fp']:.0f}%")
+            print(f"  {c(f, f):<4}  {host} {r['fs']} ({r['kind']} {r['owner']}): {', '.join(what)}")
+    print("\nNote: home/scratch rows are per-user quotas; project/nearline are shared by the whole allocation group.")
+    return 1 if any(err for _, _, err in results) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

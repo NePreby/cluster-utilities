@@ -24,6 +24,8 @@
 
 When `ssh -o BatchMode=yes <host>` fails or a job vanishes, run **`cluster-status [host …]`** (`bin/`) FIRST — it probes each host's master + live reachability so you can tell *your* auth expired (→ `cluster-login <host>`) from *the cluster* being down/slow, and prints the Alliance status URL (https://status.alliancecan.ca/, JS-rendered, no stable JSON API) for incidents/maintenance. e.g. it distinguishes a working `trillium` login node from a down `trillium-gpu` one.
 
+To check storage, run **`cluster-quota [host …]`** (`bin/`). It runs `diskusage_report` on every cluster in parallel (default: fir, narval, rorqual, nibi, trillium) and prints one table of space **and** file-count usage per filesystem and allocation. Anything at ≥80% is flagged, and anything over quota is flagged OVER. `--only rrg-kjerbi` narrows it to one allocation's project/nearline rows. It's read-only and light enough for a login node.
+
 **Recommended — symlink it into a dir already on your PATH** (e.g. `~/.local/bin`):
 ```bash
 ln -s "$PWD/bin/cluster-login" ~/.local/bin/cluster-login
