@@ -1,35 +1,66 @@
 #!/usr/bin/env python3
-"""Space + file-count quota for every cluster, in one table.
+"""Space + file-count quota for every cluster, in one table — plus how much of each shared allocation is one user's.
 
 Runs each cluster's `diskusage_report` over the shared SSH master (`ssh -o BatchMode=yes`, so it fails
 fast instead of hanging on Duo), parses it, and flags anything near or over quota — space AND inodes,
-per filesystem and per allocation (def-/rrg-/aip-kjerbi). Read-only; `diskusage_report` is a quick
-login-node lookup of the nightly-updated quota DB, not a filesystem scan.
+per filesystem and per allocation (def-/rrg-/aip-kjerbi).
 
-  cluster-quota                       # default clusters
+The second table splits each shared project/nearline space by user. Where the cluster publishes a
+per-user breakdown (`diskusage_report --per_user --all_users`; fir, narval — updated nightly) that is
+used as-is. Elsewhere (rorqual, nibi, trillium, …) it falls back to scanning the user's own dir,
+/project|/nearline/<alloc>/<user>, with a niced metadata-only `find` (files the user keeps elsewhere in
+the allocation are missed; another user's private dir reads as n/a). `--no-scan` skips that fallback.
+
+  cluster-quota                       # all clusters, your share
   cluster-quota fir narval            # just these
+  cluster-quota --user venki915       # someone else's share
   cluster-quota --only rrg-kjerbi     # only rows for one allocation (project/nearline)
   cluster-quota --raw                 # also print each cluster's raw diskusage_report
 
 Masters down -> `cluster-login <host>` first. trillium-gpu shares trillium's filesystems (skip it).
-TamIA / Killarney / Vulcan (aip-kjerbi) need an ssh alias in ~/.ssh/config before they can be listed here.
 """
 import argparse
 import re
+import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-DEFAULT_HOSTS = ["fir", "narval", "rorqual", "nibi", "trillium"]
+DEFAULT_HOSTS = ["fir", "narval", "rorqual", "nibi", "trillium", "tamia", "killarney", "vulcan"]
 WARN, CRIT = 80.0, 95.0  # diskusage_report itself warns at 95%
+SCAN_MARK = "@@SCAN"
 
 ROW = re.compile(
     r"^\s*(?P<fs>/\w+) \((?P<kind>\w+) (?P<owner>[\w.-]+)\)\s+(?:->\s+)?"
     r"(?P<su>[\d.]+\s*[KMGTP]?i?B)/\s*(?P<sq>[\d.]+\s*[KMGTP]?i?B)\s+"
     r"(?P<fu>[\d.]+\s*[KMG]?)\s*/\s*(?P<fq>[\d.]+\s*[KMG]?)\s*$"
 )
+BREAKDOWN = re.compile(r"^Breakdown for \w+ (?P<owner>[\w.-]+)")
+USER_ROW = re.compile(r"^\s*(?P<user>[\w.-]+)\s+(?P<files>\d+)\s+(?P<size>[\d.]+) (?P<unit>[KMGTP]?i?B)\s+\S")
 SIZE = {"": 1, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15,
         "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50}
+
+# Runs on the cluster. Prints the per-user report; then, for each /project|/nearline/<alloc>/<user> dir whose
+# allocation has no per-user breakdown in that report, a "@@SCAN fs alloc bytes files" line. (find only reads
+# metadata, so scanning /nearline never recalls anything from tape.)
+REMOTE = r"""
+U=%(user)s
+r=$(diskusage_report --per_user --all_users 2>&1); printf '%%s\n' "$r"
+[ %(scan)s = 1 ] || exit 0
+# "<fs> <alloc>" pairs the report already broke down per user (a breakdown follows its filesystem's quota rows).
+have=$(printf '%%s\n' "$r" | awk '/^ *\/[a-z]+ \(/ {fs=$1} /^Breakdown for / {print fs, $4}')
+for d in /project/*/"$U" /nearline/*/"$U"; do
+  [ -d "$d" ] || continue
+  a=$(basename "$(dirname "$d")"); fs=/$(echo "$d" | cut -d/ -f2)
+  printf '%%s\n' "$have" | grep -qx "$fs $a" && continue
+  if [ -r "$d" ] && [ -x "$d" ]; then
+    timeout 600 nice -n 19 find "$d" -printf '%%b\n' 2>/dev/null \
+      | awk -v fs="$fs" -v a="$a" '{b+=$1; n++} END {printf "%(mark)s %%s %%s %%.0f %%d\n", fs, a, b*512, n}'
+  else
+    echo "%(mark)s $fs $a - -"
+  fi
+done
+"""
 
 
 def to_bytes(s):
@@ -42,37 +73,77 @@ def to_count(s):
     return float(m.group(1)) * SIZE[m.group(2)]
 
 
+def human(b):
+    for u in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
+        if b < 1024 or u == "PiB":
+            return f"{b:.0f}{u}" if u == "B" else f"{b:.1f}{u}"
+        b /= 1024
+
+
+def count(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}K" if n >= 1e3 else f"{n:.0f}"
+
+
 def pct(used, quota):
     return 100.0 * used / quota if quota else 0.0
 
 
-def fetch(host):
+def fetch(host, user, scan):
+    u = shlex.quote(user) if user else '"$USER"'
+    script = REMOTE % {"user": u, "scan": int(scan), "mark": SCAN_MARK}
     try:
         p = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "bash -lc diskusage_report"],
-            capture_output=True, text=True, timeout=180,
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "bash -l -s"],
+            input=script, capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
         return host, None, "timed out (login node slow? try `cluster-status`)"
+    if "Host key verification failed" in p.stderr:
+        return host, None, f"host key unknown -> cluster-login {host} (check fingerprint vs 'SSH host keys.md')"
     if p.returncode == 255 or "Permission denied" in p.stderr:
         return host, None, f"ssh failed -> cluster-login {host}"
+    if not any(ROW.match(l) for l in p.stdout.splitlines()):
+        return host, None, f"no diskusage_report output (rerun with --raw): {p.stderr.strip()[:80]}"
     return host, p.stdout, None
 
 
-def parse(text):
-    rows = []
+def parse(text, user):
+    """-> quota rows; each gets r["mine"] = (bytes, files, source) when a per-user figure exists."""
+    rows, scans, section, last_fs = [], {}, None, None
     for line in text.splitlines():
-        m = ROW.match(line)
-        if not m:
+        if line.startswith(SCAN_MARK):
+            _, fs, alloc, b, n = line.split()
+            scans[fs, alloc] = None if b == "-" else (float(b), float(n))
             continue
-        d = m.groupdict()
-        rows.append({
-            "fs": d["fs"], "kind": d["kind"], "owner": d["owner"],
-            "su": d["su"].replace(" ", ""), "sq": d["sq"].replace(" ", ""),
-            "fu": d["fu"].strip(), "fq": d["fq"].strip(),
-            "sp": pct(to_bytes(d["su"]), to_bytes(d["sq"])),
-            "fp": pct(to_count(d["fu"]), to_count(d["fq"])),
-        })
+        m = ROW.match(line)
+        if m:
+            d = m.groupdict()
+            last_fs, section = d["fs"], None
+            rows.append({
+                "fs": d["fs"], "kind": d["kind"], "owner": d["owner"],
+                "su": d["su"].replace(" ", ""), "sq": d["sq"].replace(" ", ""),
+                "fu": d["fu"].strip(), "fq": d["fq"].strip(),
+                "used_b": to_bytes(d["su"]), "quota_b": to_bytes(d["sq"]),
+                "used_n": to_count(d["fu"]), "quota_n": to_count(d["fq"]),
+                "mine": None,
+            })
+            continue
+        m = BREAKDOWN.match(line)
+        if m:
+            # A breakdown belongs to the row of this owner on the filesystem listed just before it.
+            section = next((r for r in reversed(rows) if r["owner"] == m["owner"] and r["fs"] == last_fs), None)
+            if section is not None:
+                section["mine"] = (0.0, 0.0, "report")
+            continue
+        m = USER_ROW.match(line)
+        if section is not None and m and m["user"] == user:
+            b, n, src = section["mine"]
+            section["mine"] = (b + float(m["size"]) * SIZE[m["unit"][:-1]], n + int(m["files"]), src)
+    for r in rows:
+        key = (r["fs"], r["owner"])
+        if r["kind"] != "user" and r["mine"] is None and key in scans:
+            s = scans[key]
+            r["mine"] = (s[0], s[1], f"scan {r['fs']}/{r['owner']}/{user}") if s else (None, None, "no access")
     return rows
 
 
@@ -86,7 +157,9 @@ def flag(p):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("hosts", nargs="*", default=DEFAULT_HOSTS)
+    ap.add_argument("--user", help="whose share to break out (default: your login on each cluster)")
     ap.add_argument("--only", metavar="ALLOC", help="only project/nearline rows of this allocation, e.g. rrg-kjerbi")
+    ap.add_argument("--no-scan", action="store_true", help="don't scan /project|/nearline/<alloc>/<user> where no per-user report exists")
     ap.add_argument("--raw", action="store_true", help="also print the raw diskusage_report output")
     a = ap.parse_args()
 
@@ -97,22 +170,32 @@ def main():
         return f"{paint[f]}{text}\033[0m" if color and f in paint else text
 
     with ThreadPoolExecutor(len(a.hosts)) as ex:
-        results = list(ex.map(fetch, a.hosts))
+        results = list(ex.map(lambda h: fetch(h, a.user, not a.no_scan), a.hosts))
 
-    hdr = f"{'cluster':<10} {'filesystem':<10} {'owner':<20} {'space used/quota':>22} {'%':>5}   {'files used/quota':>17} {'%':>5}  flag"
+    parsed = []
+    for host, out, err in results:
+        rows = []
+        if out:
+            user = a.user or (subprocess.run(["ssh", "-G", host], capture_output=True, text=True).stdout
+                              .split("\nuser ", 1)[-1].split("\n", 1)[0].strip())
+            rows = parse(out, user)
+            if a.only:
+                rows = [r for r in rows if r["owner"] == a.only and r["kind"] != "user"]
+        parsed.append((host, out, err, rows))
+
+    hdr = (f"{'cluster':<10} {'filesystem':<10} {'owner':<20} {'space used/quota':>22} {'%':>5}   "
+           f"{'files used/quota':>17} {'%':>5}  flag")
     print(hdr)
     print("-" * len(hdr))
     worst = []
-    for host, out, err in results:
+    for host, out, err, rows in parsed:
         if err:
             print(f"{host:<10} {c(err, 'CRIT')}")
             continue
-        rows = parse(out)
-        if a.only:
-            rows = [r for r in rows if r["owner"] == a.only and r["kind"] != "user"]
         if not rows:
             print(f"{host:<10} (no matching rows; rerun with --raw)")
         for r in rows:
+            r["sp"], r["fp"] = pct(r["used_b"], r["quota_b"]), pct(r["used_n"], r["quota_n"])
             f = flag(max(r["sp"], r["fp"]))
             owner = f"{r['kind']} {r['owner']}"
             space = f"{r['su']} / {r['sq']}"
@@ -131,8 +214,28 @@ def main():
             if flag(r["sp"]): what.append(f"space {r['sp']:.0f}%")
             if flag(r["fp"]): what.append(f"files {r['fp']:.0f}%")
             print(f"  {c(f, f):<4}  {host} {r['fs']} ({r['kind']} {r['owner']}): {', '.join(what)}")
-    print("\nNote: home/scratch rows are per-user quotas; project/nearline are shared by the whole allocation group.")
-    return 1 if any(err for _, _, err in results) else 0
+
+    who = a.user or "you"
+    print(f"\nShare of shared allocations held by {who}  (% of group usage | % of quota):")
+    hdr2 = f"{'cluster':<10} {'filesystem':<10} {'allocation':<12} {'space':>10} {'%used':>6} {'%quota':>7}   {'files':>7} {'%used':>6} {'%quota':>7}  source"
+    print(hdr2)
+    print("-" * len(hdr2))
+    for host, out, err, rows in parsed:
+        for r in rows:
+            if r["kind"] == "user" or r["used_n"] == 0 and r["used_b"] < 1e6:
+                continue  # per-user quotas are all yours; skip empty allocations
+            b, n, src = r["mine"] or (None, None, "no per-user report, no /<fs>/<alloc>/<user> dir (or --no-scan)")
+            if b is None:
+                print(f"{host:<10} {r['fs']:<10} {r['owner']:<12} {'n/a':>10} {'':>6} {'':>7}   {'n/a':>7} {'':>6} {'':>7}  {src}")
+                continue
+            qs, qn = pct(b, r["quota_b"]), pct(n, r["quota_n"])
+            print(f"{host:<10} {r['fs']:<10} {r['owner']:<12} {human(b):>10} {pct(b, r['used_b']):5.0f}% "
+                  f"{c(f'{qs:6.0f}%', flag(qs))}   {count(n):>7} {pct(n, r['used_n']):5.0f}% {c(f'{qn:6.0f}%', flag(qn))}  {src}")
+
+    print("\nNotes: home/scratch rows are per-user quotas; project/nearline are shared by the allocation group.\n"
+          "'report' figures are diskusage_report's nightly per-user breakdown; 'scan' figures are live and cover\n"
+          "only the user's own dir. Either can exceed 100% of 'used' since the quota line and breakdown are taken at different times.")
+    return 1 if any(err for _, _, err, _ in parsed) else 0
 
 
 if __name__ == "__main__":
