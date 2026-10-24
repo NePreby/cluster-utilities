@@ -8,6 +8,8 @@ Before the repo is cloned, read this file with
 
 ## Starting state of each new machine (2026-10)
 - CachyOS, upgraded recently. The owner's login shell is **fish**.
+  Not always: `lkj009-psy`'s login shell is **bash**, and the owner chose to keep it, so it has no SSH
+  session menu (`fleet-onboard` skips the menu unless the login shell is fish). Check `getent passwd $USER`.
 - KDE Plasma, which by default **suspends after 15 min idle**. A suspended machine drops off the tailnet
   and nobody can wake it remotely, so A1 and A2 turn that off (and the reboot check in B7 tests it).
 - Tailscale is installed. It may not be logged in, or it may be **logged in to another tailnet** (lkj010-psy
@@ -26,7 +28,7 @@ Before the repo is cloned, read this file with
   hidden, if the owner wants that route. The default (a browser login) needs no key.
 - **Password ssh login stays enabled on purpose.** Don't run `bin/harden-sshd-keyonly`, and don't edit
   sshd_config.
-- Remote shells are fish. Send scripts as `ssh -o BatchMode=yes <alias> bash -s <<'EOF' … EOF`.
+- Remote shells are fish (bash on `lkj009-psy`). Send scripts as `ssh -o BatchMode=yes <alias> bash -s <<'EOF' … EOF`.
 - Do one machine end to end, including the reboot check, before starting the next. An agent on the new
   machine does side A only and queues side B as an issue (A5), but the next machine still waits until
   that issue's reboot check has passed.
