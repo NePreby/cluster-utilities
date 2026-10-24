@@ -24,15 +24,18 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
      UNLISTED, LEGACY, EMPTY (an empty dir: `rmdir` it). `UNDECIDED` means decide the owner first.
    - **Stop flags.** Any of these means the copy holds something not saved elsewhere: NOGIT, NESTED,
      NOREMOTE, LOCALREMOTE, SUBMODULE-NOBACKUP, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, HIDDENIDX,
-     LFS, REPLACE, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then re-run.
+     LFS, LFS-EXTERNAL, REPLACE, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then
+     re-run.
      `IGNORED` and `LFS` stay on re-runs, so they need a check you do yourself (and note down):
      - `IGNORED:n` (usually the data): copy and verify it as in "Moving gitignored data" below.
        Git can't vouch for it.
-     - `LFS:n`: **keep the copy, or archive the whole repo directory first** (the tar recipe below,
-       including the `tar -df` check). A successful `git lfs push --all` is NOT enough: `lfs.url` can
-       send the upload somewhere other than the forge, and it skips LFS objects no commit points to
-       (e.g. a file staged and then reset). Both still exit 0. Don't empty the store to make the flag
-       go away.
+     - `LFS:n`: **keep the copy, or archive the whole repo directory first** with the recipe below,
+       but only if the row has **no `LFS-EXTERNAL`**. That flag means the LFS store lives outside the
+       repo directory (an absolute `lfs.storage`, a symlinked `objects` dir, or a linked worktree using
+       the main repo's store), so the archive wouldn't contain it: keep the copy. A successful
+       `git lfs push --all` is NOT enough either: `lfs.url` can send the upload somewhere other than the
+       forge, and it skips LFS objects no commit points to (e.g. a file staged and then reset). Both
+       still exit 0. Don't empty the store to make the flag go away.
      - `HIDDENIDX:n`: `git ls-files -v | grep -E '^([a-z]|S) '` lists the files. Clear the bit
        (`git update-index --no-assume-unchanged / --no-skip-worktree <f>`) and commit any real edit.
      - `REPLACE:n`: `git replace -l` lists the replaced objects. If a replacement holds content you
@@ -54,15 +57,24 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    - git-annex content.
 
    If any of that matters for a repo, archive the **whole repo directory** before deleting it,
-   `.git` included (that's where the reflog, LFS store and annex objects live), and check the archive
-   against the disk:
+   `.git` included (that's where the reflog, LFS store and annex objects live). Each archive goes in its
+   own new directory, so archiving `~/code/x` and `~/Projects/x` on the same day can't overwrite each
+   other:
    ```bash
-   cd <parent-of-repo>                        # not inside the repo: tar would read its own output
-   a=~/archives/<repo>-$(date +%F).tar.gz     # outside every fleet root (or fleet-audit flags it LOOSE)
-   mkdir -p ~/archives && tar -czf "$a" <repo> && tar -dzf "$a" && echo VERIFIED
+   # 0. stop anything still writing to the repo (jobs, editors, agents)
+   cd <parent-of-repo>                       # not inside the repo: tar would read its own output
+   mkdir -p ~/archives                       # outside every fleet root (or fleet-audit flags it LOOSE)
+   d=$(mktemp -d ~/archives/"$(hostname)-<repo>-$(date +%F)-XXXXXX")
+   printf 'host=%s\nsource=%s\n' "$(hostname)" "$PWD/<repo>" > "$d/SOURCE"
+   tar -czf "$d/<repo>.tar.gz" <repo> && tar -dzf "$d/<repo>.tar.gz" \
+     && (cd "$d" && sha256sum <repo>.tar.gz > SHA256SUMS) && echo "VERIFIED: $d"
+   # copy that directory to ANOTHER machine (its name is unique; --ignore-existing never replaces
+   # anything there) and check the checksum on arrival
+   rsync -a --ignore-existing "$d" <other-host>:archives/ \
+     && ssh <other-host> "cd archives/$(basename "$d") && sha256sum -c SHA256SUMS"
    ```
-   `tar -d` compares the archive with the files on disk. Only `VERIFIED` (exit 0, no differences)
-   counts. Then copy the archive somewhere that isn't this machine before deleting the repo.
+   `tar -d` compares the archive with the files on disk. Delete the repo only after **both** `VERIFIED`
+   and `<repo>.tar.gz: OK` from the other machine.
    `git bundle --all` is **not** a full copy: it leaves out reflog-only commits and anything outside git
    objects (LFS, annex).
 
@@ -155,8 +167,10 @@ GitHub shows up here too. To see the actual commits before assuming work is at r
 server the same way the tool does (forge remote `origin` here). Don't use `--not --remotes=origin`,
 because cached tracking refs can be stale:
 ```bash
-git fetch --prune origin
-git ls-remote origin | awk -F'\t' 'NF {print $1}' | git cat-file --batch-check='%(objectname) %(objecttype)' \
+# bash syntax (in fish: run it inside `bash -c '…'`). The && chain stops if the server can't be reached;
+# otherwise an empty answer would make git log list ALL local history as unpushed.
+git fetch --prune origin && adv=$(git ls-remote origin) && printf '%s\n' "$adv" \
+  | awk -F'\t' 'NF {print $1}' | git cat-file --batch-check='%(objectname) %(objecttype)' \
   | awk '$2 ~ /^(commit|tag|tree|blob)$/ {print "^" $1}' \
   | git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin
 ```
