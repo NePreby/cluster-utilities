@@ -54,48 +54,65 @@ for a in "$@"; do
   esac
 done
 
-# --- parse hosts.yaml -> "id<TAB>ssh<TAB>roots<TAB>status" for EVERY host ---
-# Every line is normalized first (inline `# …` comments + trailing whitespace stripped), so an
-# annotated host line (`  lab2:   # new box`) still starts a new host instead of merging into the last.
-hosts_all=$(awk '
-  function flush() { if (id != "") print id "\t" ssh "\t" roots "\t" st; id="" }
-  { line=$0; sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+# --- parse hosts.yaml -> "id US ssh US roots US status" for EVERY host (US = \x1f) ---
+# Strict on purpose: the deletion rule trusts "every host audited", so an inventory line the parser
+# doesn't understand is a config error (exit 2), never a host that quietly drops out. Every line is
+# normalized first (CR, inline `# …` comments, trailing whitespace), so `  lab2:   # new box` works.
+# \x1f instead of tabs: bash `read` collapses adjacent tabs, which shifted fields when one was empty.
+US=$'\x1f'
+hosts_all=$(awk -v US="$US" '
+  function flush() {
+    if (id == "") return
+    if (st == "") { err("host " id ": missing status:") }
+    else if (st != "active" && st != "planned" && st != "retired") { err("host " id ": status must be active|planned|retired, got " st) }
+    if (st == "active" && (ssh == "" || roots == "")) { err("active host " id ": needs ssh: and roots:") }
+    print id US ssh US roots US st; id="" }
+  function err(m) { print "hosts.yaml: " m > "/dev/stderr"; bad=1 }
+  { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
   line == "" { next }
   line == "hosts:" { inh=1; next }
   line ~ /^[^ ]/ { flush(); inh=0; next }
   !inh { next }
-  line ~ /^  [A-Za-z0-9_.-]+:$/ { flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""; next }
-  line ~ /^    [a-z_]+:/ {
+  line ~ /^  [A-Za-z0-9_.-]+:$/ {
+    flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""
+    if (id in seen) err("host " id " defined twice"); seen[id]=1; next }
+  id != "" && line ~ /^    [a-z_]+:/ {
     key=line; sub(/^    /, "", key); sub(/:.*/, "", key)
     val=line; sub(/^    [a-z_]+:[[:space:]]*/, "", val)
     if (key == "ssh") ssh=val; else if (key == "roots") roots=val; else if (key == "status") st=tolower(val)
     next }
-  { print "hosts.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }
-  END { flush() }' "$HOSTS")
+  { err("line " NR " not understood (expected 2-space host id or 4-space key: value): " $0) }
+  END { flush(); exit bad ? 2 : 0 }' "$HOSTS") || { echo "fix fleet/hosts.yaml first (nothing was scanned)" >&2; exit 2; }
 
-hosts_tsv=""; declare -A known=()
-while IFS=$'\t' read -r id ssh roots st; do
+hosts_tsv=""; declare -A known=(); skipped=()
+while IFS="$US" read -r id ssh roots st; do
   [ -z "$id" ] && continue
-  [ -n "${known[$id]:-}" ] && { echo "hosts.yaml: host '$id' defined twice" >&2; exit 2; }
   known[$id]=$st
-  if [ "$st" != active ]; then echo "(skipping host '$id': status ${st:-<none>})" >&2; continue; fi
-  if [ -z "$ssh" ] || [ -z "$roots" ]; then echo "hosts.yaml: active host '$id' needs ssh: and roots:" >&2; exit 2; fi
-  hosts_tsv+="$id"$'\t'"$ssh"$'\t'"$roots"$'\n'
+  if [ "$st" != active ]; then skipped+=("$id ($st)"); continue; fi
+  hosts_tsv+="$id$US$ssh$US$roots"$'\n'
 done <<<"$hosts_all"
+[ -z "$hosts_tsv" ] && { echo "hosts.yaml: no active hosts" >&2; exit 2; }
 for h in "${only[@]}"; do
   if [ -z "${known[$h]:-}" ]; then echo "unknown host id '$h' (known: ${!known[*]})" >&2; exit 2; fi
   if [ "${known[$h]}" != active ]; then echo "host '$h' is not active (status: ${known[$h]})" >&2; exit 2; fi
 done
 
 # --- parse projects.yaml -> "name<TAB>host,host" ([*] = every host, [?] = undecided) ---
-proj_tsv=$(awk '
-  { line=$0; sub(/[[:space:]]+#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+proj_tsv=$(awk -v US="$US" '
+  { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+  line == "" || line == "projects:" { next }
   line ~ /^  [^ #][^:]*:[[:space:]]*\[[^]]*\]$/ {
     name=line; sub(/^  /, "", name); sub(/:.*/, "", name); gsub(/^["\047]|["\047]$/, "", name)
     hs=line; sub(/^[^\[]*\[/, "", hs); sub(/\].*/, "", hs); gsub(/[[:space:]]/, "", hs)
     if (name in seen) { print "projects.yaml:" NR ": duplicate entry " name " (first one wins)" > "/dev/stderr"; next }
-    seen[name]=1; print name "\t" hs; next }
-  line ~ /^  [^ #]/ { print "projects.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }' "$PROJECTS")
+    seen[name]=1; print name US hs; next }
+  { print "projects.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }' "$PROJECTS")
+while IFS="$US" read -r p hs; do
+  IFS=, read -ra hl <<<"$hs"
+  for h in "${hl[@]}"; do
+    case "$h" in '*'|'?') ;; *) [ -n "${known[$h]:-}" ] || echo "projects.yaml: $p lists unknown host id '$h'" >&2 ;; esac
+  done
+done <<<"$proj_tsv"
 
 # --- the per-host scanner (runs under bash on each host; args: fetch size root...) ---
 # Prints one TSV row per entry: root, name, branch, url, size, flags. Last line is `#DONE`: a scan
@@ -132,7 +149,8 @@ count_unpushed() {
   unp=$((unp+n))
 }
 
-emit() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
+# fields are \x1f-separated and never empty (bash `read` would shift them otherwise)
+emit() { printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${1:--}" "${2:--}" "${3:--}" "${4:--}" "${5:--}" "${6:--}"; }
 
 scan_repo() {
   local root=$1 n=$2 repo=$3
@@ -205,25 +223,31 @@ scan_repo() {
 
 scan_entry() {   # $1 root as written, $2 display name, $3 abs path
   local root=$1 n=$2 d=$3 top nested=() sz=- x
-  if [[ "$n" == *$'\t'* || "$n" == *$'\n'* ]]; then n=$(printf '%q' "$n"); badname=" BADNAME"; else badname=""; fi
+  if [[ "$n" == *$'\t'* || "$n" == *$'\n'* || "$n" == *$'\x1f'* ]]; then n=$(printf '%q' "$n"); badname=" BADNAME"; else badname=""; fi
+  if [ ! -r "$d" ] || [ ! -x "$d" ]; then emit "$root" "$n" - - - "ERR NOACCESS$badname"; return; fi
   top=$(git --no-optional-locks -C "$d" rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$top" ] && [ "$top" = "$(realpath "$d")" ]; then scan_repo "$root" "$n" "$d"; return; fi
   [ "$size" = 1 ] && sz=$(du -sh "$d" 2>/dev/null | cut -f1)
   if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then emit "$root" "$n" - - "$sz" "EMPTY$badname"; return; fi
   # git repos nested inside a non-git dir (kirby/katam): list them and audit each one
-  while IFS= read -r -d '' x; do nested+=("$(dirname "$x")"); done \
-    < <(find "$d" -mindepth 2 -maxdepth 4 -name .git -print0 -prune 2>/dev/null)
+  # (find runs into a temp file so its exit status is visible: an unreadable subdir means "can't tell")
+  local nf ferr=""; nf=$(mktemp)
+  find "$d" -mindepth 2 -maxdepth 6 -name .git -print0 -prune >"$nf" 2>/dev/null || ferr=" ERR"
+  while IFS= read -r -d '' x; do nested+=("$(dirname "$x")"); done <"$nf"; rm -f "$nf"
   if [ ${#nested[@]} -gt 0 ]; then
-    emit "$root" "$n" - - "$sz" "NOGIT NESTED:${#nested[@]}$badname"
+    emit "$root" "$n" - - "$sz" "NOGIT NESTED:${#nested[@]}$ferr$badname"
     for x in "${nested[@]}"; do scan_repo "$root" "$n/${x#"$d"/}" "$x"; done
   else
-    emit "$root" "$n" - - "$sz" "NOGIT$badname"
+    emit "$root" "$n" - - "$sz" "NOGIT$ferr$badname"
   fi
 }
 
 for root in "$@"; do
   r="${root/#\~/$HOME}"; r="${r%/}"
-  if [ ! -d "$r" ]; then emit "$root" "(root)" - - - ROOT-MISSING; continue; fi
+  if [ ! -e "$r" ]; then emit "$root" "(root)" - - - ROOT-MISSING; continue; fi
+  # exists but can't be listed: with nullglob that would look like an empty root, so the host's
+  # audit is marked incomplete instead
+  if [ ! -d "$r" ] || [ ! -r "$r" ] || [ ! -x "$r" ]; then echo "#ROOTERR $root: not a readable directory"; continue; fi
   loose=0
   for e in "$r"/*; do
     if [ -L "$e" ] || [ ! -d "$e" ]; then loose=$((loose+1)); continue; fi
@@ -237,7 +261,7 @@ EOF
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 tmo=600; [ "$fetch" = 1 ] && tmo=1800; tmo=${FLEET_AUDIT_TIMEOUT:-$tmo}   # per-host scan timeout (s)
 ran=()
-while IFS=$'\t' read -r id ssh roots; do
+while IFS="$US" read -r id ssh roots; do
   [ -z "$id" ] && continue
   if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $id " ]]; then continue; fi
   ran+=("$id")
@@ -259,10 +283,10 @@ wait
 failed=0
 printf '%-40s %-7s %-11s %-24s %-6s %s\n' DIR HOST ROOT BRANCH SIZE FLAGS
 for id in "${ran[@]}"; do
-  grep -v '^#DONE$' "$tmp/$id.tsv" | while IFS=$'\t' read -r root n br url sz fl; do
-    flags=($fl)
+  grep -v '^#' "$tmp/$id.tsv" | while IFS="$US" read -r root n br url sz fl; do
+    flags=($fl); [ "$fl" = - ] && flags=()
     top=${n%%/*}
-    want=$(awk -F'\t' -v n="$top" '$1==n {print $2}' <<<"$proj_tsv")
+    want=$(awk -F"$US" -v n="$top" '$1==n {print $2}' <<<"$proj_tsv")
     if [[ "$n" == "(root)" || "$n" == "(loose files)" ]]; then :
     elif [ -z "$want" ]; then flags+=(UNLISTED)
     elif [ "$want" = "?" ]; then flags+=(UNDECIDED)
@@ -276,23 +300,27 @@ done | sort -k1,1 -k2,2
 
 echo
 for id in "${ran[@]}"; do
-  rc=$(cat "$tmp/$id.rc" 2>/dev/null || echo '?'); n=$(grep -vc '^#DONE$' "$tmp/$id.tsv")
-  if [ "$rc" = 0 ] && [ "$(tail -1 "$tmp/$id.tsv")" = '#DONE' ]; then
+  rc=$(cat "$tmp/$id.rc" 2>/dev/null || echo '?'); n=$(grep -vc '^#' "$tmp/$id.tsv")
+  rooterr=$(sed -n 's/^#ROOTERR //p' "$tmp/$id.tsv")
+  if [ "$rc" = 0 ] && [ "$(tail -1 "$tmp/$id.tsv")" = '#DONE' ] && [ -z "$rooterr" ]; then
     echo "== $id: audited ($n entries)"
     # projects registered for this host but not found (only meaningful after a complete scan)
-    while IFS=$'\t' read -r p want; do
+    while IFS="$US" read -r p want; do
       case "$want" in '?'|'') continue ;; '*') ;; *) [[ ",$want," == *",$id,"* ]] || continue ;; esac
-      awk -F'\t' -v p="$p" '$2==p {f=1} END {exit !f}' "$tmp/$id.tsv" || echo "   -- $p: registered for $id but not found there"
+      awk -F"$US" -v p="$p" '$2==p {f=1} END {exit !f}' "$tmp/$id.tsv" || echo "   -- $p: registered for $id but not found there"
     done <<<"$proj_tsv"
   else
     failed=1
     why="exit $rc"; [ "$rc" = 124 ] && why="timed out after ${tmo}s"; [ "$rc" = 255 ] && why="ssh failed"
-    if [ "$n" -gt 0 ]; then
+    if [ -n "$rooterr" ]; then
+      echo "!! $id: INCOMPLETE, root(s) could not be listed: $(tr '\n' ';' <<<"$rooterr")"
+    elif [ "$n" -gt 0 ]; then
       echo "!! $id: INCOMPLETE ($why) after $n entries. Entries not shown above were NOT checked, not clean"
     else
       echo "!! $id: NOT AUDITED ($why): $(tr '\n' ' ' < "$tmp/$id.err" | head -c 200)"
     fi
   fi
 done
+for sk in "${skipped[@]}"; do echo "-- skipped host $sk: not audited"; done
 [ "$fetch" = 0 ] && echo "note: no --fetch, so UNPUSHED/BEHIND use cached remote refs. Run with --fetch before deleting anything."
 exit "$failed"
