@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Install bin/clock-from-https + its hourly timer on THIS machine, then run it once.
+# For machines on networks that block NTP (UdeM lab: #13, #16). Off campus it does nothing while NTP
+# is synchronized. Idempotent: rerun after changing the script or units.
+#
+#   sudo bin/fleet-clock-install          (re-launches itself with sudo if needed)
+#   from the laptop:  ssh -t labN 'sudo bash ~/Projects/cluster-utilities/bin/fleet-clock-install'
+set -euo pipefail
+[ "$(id -u)" = 0 ] || exec sudo -- bash "$(readlink -f "$0")" "$@"
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+# copied, not linked: root shouldn't run a script from a user-writable checkout
+install -m 755 -o root -g root "$here/bin/clock-from-https" /usr/local/sbin/clock-from-https
+install -m 644 -o root -g root "$here/fleet/systemd/clock-from-https.service" \
+  "$here/fleet/systemd/clock-from-https.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now clock-from-https.timer >/dev/null
+systemctl start clock-from-https.service || true   # exit 1 = sources disagreed / offline; the timer retries
+echo "== $(hostname): $(journalctl -u clock-from-https.service -n 1 --no-pager -o cat)"
+echo "   timer: $(systemctl is-enabled clock-from-https.timer), next run $(systemctl show clock-from-https.timer -p NextElapseUSecRealtime --value)"

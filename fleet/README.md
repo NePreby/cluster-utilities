@@ -147,6 +147,13 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 for p in AC Battery LowBattery; do kwriteconfig6 --file powerdevilrc --group $p --group SuspendAndShutdown --key AutoSuspendAction 0; done
 ```
 
+**1c. Clock.** The UdeM network blocks NTP (wired and Wi-Fi), so lab clocks drift by minutes to
+hours. `fleet-onboard` runs `bin/fleet-clock-install`: `clock-from-https` (sets the clock from the
+`Date:` header of a few big HTTPS sites, majority vote, steps only beyond 2 s, writes the RTC) plus an
+hourly timer. It does nothing while NTP is synchronized, so off campus timesyncd stays in charge.
+Check any box with `bin/clock-from-https --dry-run`; if UdeM IT ever names an NTP server, switch to a
+timesyncd drop-in (`NTP=` then `NTP=<server>`, since CachyOS ships its own `NTP=`) and drop this.
+
 **2. In the admin console**, disable key expiry for the new machine. Otherwise it silently
 drops off the tailnet after ~180 days, which you'd only notice once you're remote.
 

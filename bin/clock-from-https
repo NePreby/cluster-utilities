@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Set the clock from HTTPS `Date:` headers, for networks that block NTP (the UdeM lab network:
+# cluster-utilities #13, #16). Installed as /usr/local/sbin/clock-from-https and run hourly by
+# clock-from-https.timer (bin/fleet-clock-install).
+#
+# - Does nothing while NTP works (`NTPSynchronized=yes`, e.g. off campus), so it never fights timesyncd.
+# - Asks several HTTPS servers; each one's offset is measured against the local clock right when its
+#   answer arrives. Takes the median and needs a majority (and at least 2) of the answers to agree with
+#   it within $agree s, else changes nothing. One stale source is outvoted.
+# - Steps the clock (median offset) only if it's off by more than $threshold s, then writes the RTC.
+#   The header has 1 s resolution, so expect the result within ~1 s.
+#
+#   clock-from-https              (root) check, and fix if needed
+#   clock-from-https --dry-run    (any user) print the offsets, change nothing
+#   clock-from-https --force      (root) also when NTP says it's synchronized
+set -uo pipefail
+# Big sites whose Date: header is fresh. Not github.com (CDN, seen 10 s stale) or wikipedia (cached, hours off).
+sources=(https://www.google.com https://www.cloudflare.com https://www.microsoft.com https://www.apple.com)
+threshold=2
+agree=2          # a source agrees if it's within this many seconds of the median
+
+mode=${1:-}
+case "$mode" in ''|--dry-run|--force) ;; *) echo "usage: clock-from-https [--dry-run|--force]" >&2; exit 2;; esac
+[ "$mode" = --dry-run ] || [ "$(id -u)" = 0 ] || { echo "clock-from-https: needs root (or --dry-run)" >&2; exit 2; }
+
+ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)
+if [ "$mode" = "" ] && [ "$ntp" = yes ]; then
+  echo "NTP is synchronized; leaving the clock to timesyncd"; exit 0
+fi
+
+offs=()
+for u in "${sources[@]}"; do
+  h=$(curl -sI --max-time 5 "$u" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: *//p' | head -1)
+  now=$(date -u +%s)
+  if [ -n "$h" ] && s=$(date -u -d "$h" +%s 2>/dev/null); then
+    offs+=($((s - now)))
+  else
+    echo "no usable Date: header from $u"
+  fi
+done
+if [ ${#offs[@]} -lt 2 ]; then
+  echo "only ${#offs[@]} source(s) answered; clock left alone"; exit 1
+fi
+mapfile -t sorted < <(printf '%s\n' "${offs[@]}" | sort -n)
+off=${sorted[$(( (${#sorted[@]} - 1) / 2 ))]}
+ok=0; for o in "${sorted[@]}"; do d=$(( o - off )); [ ${d#-} -le $agree ] && ok=$((ok + 1)); done
+if [ $ok -lt 2 ] || [ $(( ok * 2 )) -le ${#sorted[@]} ]; then
+  echo "sources disagree (offsets ${sorted[*]}); clock left alone"; exit 1
+fi
+echo "offset ${off} s (sources: ${sorted[*]}; NTP synchronized: $ntp)"
+
+[ "$mode" = --dry-run ] && exit 0
+if [ ${off#-} -le $threshold ]; then
+  echo "within ${threshold} s; nothing to do"; exit 0
+fi
+date -u -s "@$(( $(date -u +%s) + off ))" >/dev/null && hwclock --systohc \
+  && echo "clock stepped by ${off} s and written to the RTC; now $(date -u '+%F %T') UTC"

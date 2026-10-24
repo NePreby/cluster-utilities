@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly clock check from HTTPS Date headers (cluster-utilities #16)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

@@ -134,6 +134,8 @@ Before the repo is cloned, read this file with
    systemctl is-enabled sleep.target suspend.target hibernate.target   # masked / masked / masked
    for p in AC Battery LowBattery; do kreadconfig6 --file powerdevilrc --group $p --group SuspendAndShutdown --key AutoSuspendAction; done   # 0 0 0
    lscpu | grep 'Model name'; free -g | awk '/Mem/{print $2" GB"}'; nvidia-smi -L; df -h /home   # spec line
+   systemctl is-enabled clock-from-https.timer                 # enabled (fleet-onboard step 5b)
+   ~/Projects/cluster-utilities/bin/clock-from-https --dry-run  # offset within ±2 s (NTP is blocked on campus)
    ```
 4. **Owner, in the [Tailscale admin console](https://login.tailscale.com/admin/machines):** on the new
    machine, `…` → **Disable key expiry**. Otherwise it drops off the tailnet after about 180 days.
@@ -191,6 +193,7 @@ Before the repo is cloned, read this file with
 |---|---|
 | Clone fails: `ssh_askpass` / "Host key verification failed" | github.com isn't in known_hosts. Do the host-key part of A1 |
 | `fleet-onboard` says "already logged in" but the IP/tailnet isn't ours | Logged in to another tailnet. See A2: confirm with the owner, `sudo tailscale logout`, rerun |
+| Clock off by minutes/hours (logs, TLS, `make` confused) | NTP is blocked on the UdeM network (#13). `sudo bin/fleet-clock-install`; it then corrects hourly. `journalctl -u clock-from-https` shows each run |
 | `git commit`: "Author identity unknown" | Git identity not set: the `git config --global` lines in A1 |
 | "Refusing over SSH" | It's being run over ssh. Run it at the machine's keyboard |
 | "reboot, then rerun" | A kernel upgrade means tun can't load until reboot. Reboot, run the same command |

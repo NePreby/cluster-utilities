@@ -18,6 +18,7 @@
 #      checks DNS through /etc/resolv.conf itself (dig) and puts the old file back (exit 1) if it broke.
 #   5. runs `tailscale up` unless the node is already logged in. An auth key never reaches argv or
 #      shell history: it's read hidden from the tty into a 0600 temp file, passed as --auth-key=file:…
+#   5b. installs the hourly clock sync (bin/fleet-clock-install; NTP is blocked on campus)
 #   6. prints what to paste on the laptop (ssh alias, ssh-copy-id, hosts.yaml entry)
 #
 # Over SSH (SSH_CONNECTION, or an sshd/tailscaled parent process) it refuses without --force: steps
@@ -242,6 +243,16 @@ esac
 [ -z "$keyfile" ] || rm -f "$keyfile"
 ip4="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 ip4="${ip4:-<no IP yet: approve $host in the admin console, then run 'tailscale ip -4'>}"
+
+# 5b. clock: the UdeM network blocks NTP, so lab clocks drift (#13). Hourly HTTPS-Date sync that
+# stays idle while NTP works. Uses the sibling script; skipped if this file was copied out alone.
+clock_install="$(dirname "$(readlink -f "$0")")/fleet-clock-install"
+if [ -f "$clock_install" ]; then
+  step "clock: install the HTTPS-Date sync timer"
+  bash "$clock_install" || echo "clock sync install failed; run bin/fleet-clock-install later" >&2
+else
+  echo "clock: $clock_install not found, skipped (run bin/fleet-clock-install from the repo)" >&2
+fi
 
 # 6. hand-off
 # ssh alias follows the hostname: lkj0NN-psy -> labNN (fleet/README.md)

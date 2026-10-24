@@ -1,0 +1,8 @@
+[Unit]
+Description=Set the clock from HTTPS Date headers when NTP can't sync (cluster-utilities #16)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clock-from-https
