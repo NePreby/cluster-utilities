@@ -37,7 +37,11 @@ or by cloning the repo if the machine has GitHub access. Then:
 TS_AUTHKEY=tskey-auth-… ./fleet-onboard lkj0XX-psy # or with the key from step 0
 ```
 It sets the hostname, installs and enables `sshd` + `tailscaled`, applies the CachyOS MagicDNS fix
-(the resolv.conf symlink), and joins the tailnet. It leaves password login on.
+(the resolv.conf symlink), and joins the tailnet. It leaves password login on. It also installs the SSH
+login menu (1 plain fish / 2 tmux / 3 herdr, plain fish after 5 s) into `~/.config/fish/conf.d/`, but only
+if your login shell is fish. That menu is an embedded copy of
+`linux-config/home/dot_config/fish/conf.d/ssh-session-menu.fish`, so if you change the menu there,
+re-paste it into the script. herdr itself isn't installed, so option 3 says so until you install it.
 
 **2. In the admin console**, disable key expiry for the new machine. Otherwise it silently
 drops off the tailnet after ~180 days, which you'd only notice once you're remote.

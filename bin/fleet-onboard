@@ -6,7 +6,9 @@
 #
 # Idempotent; rerunning skips whatever is already done. Self-elevates with sudo (one prompt). It:
 #   1. sets the hostname (that becomes the Tailscale device name), if you pass one
-#   2. installs + enables sshd and tailscaled (plus git, rsync, tmux)
+#   2. installs + enables sshd and tailscaled (plus git, rsync, tmux, fish)
+#   2b. installs the SSH login menu (plain fish / tmux / herdr, plain after 5s) into the user's
+#      ~/.config/fish/conf.d/, if their login shell is fish
 #   3. applies the CachyOS MagicDNS fix: /etc/resolv.conf -> systemd-resolved stub, so that
 #      NetworkManager stops overwriting it (https://tailscale.com/s/resolved-nm)
 #   4. runs `tailscale up` unless the machine is already logged in
@@ -31,10 +33,57 @@ fi
 host="$(hostnamectl --static)"
 
 # 2. packages + services
-step "packages: tailscale openssh git rsync tmux"
-pacman -S --needed --noconfirm tailscale openssh git rsync tmux
+step "packages: tailscale openssh git rsync tmux fish"
+pacman -S --needed --noconfirm tailscale openssh git rsync tmux fish
 step "enable sshd + tailscaled"
 systemctl enable --now sshd tailscaled
+
+# 2b. SSH login menu. Source of truth: linux-config home/dot_config/fish/conf.d/ssh-session-menu.fish
+# (private repo, so a fresh box can't fetch it). Embedded copy; if you change the menu there, re-paste it here.
+read -r -d '' MENU <<'MENU_EOF' || true
+# Interactive SSH login session menu: tmux / herdr / plain fish.
+# Captured from LKJ008-psy into shared config so any SSH'd-into machine offers it.
+# Guarded so it only fires on an INTERACTIVE SSH login and never in automation:
+# skipped when non-interactive (scp/rsync/scripted ssh), already inside tmux or
+# herdr, not an SSH login, or NO_TMUX is set (escape hatch for agents/scripts).
+if status is-interactive; and not set -q TMUX; and not set -q HERDR_ENV; and set -q SSH_CONNECTION; and not set -q NO_TMUX
+    echo "Session:  1) none (plain fish)   2) tmux   3) herdr"
+    echo -n "Choice [defaults to 1) plain fish in 5s]: "
+    # fish's `read` has no timeout, so borrow bash for a 5s single-key read.
+    set -l choice (bash -c 'read -t 5 -n 1 c; printf "%s" "$c"')
+    echo
+    switch "$choice"
+        case 2
+            if type -q tmux
+                tmux attach -t main; or tmux new -s main
+            else
+                echo "tmux not installed."
+            end
+        case 3
+            if type -q herdr
+                herdr
+            else
+                echo "herdr not installed."
+            end
+        case '*'
+            # 1 / none / Enter / timeout -> stay in plain fish
+    end
+end
+MENU_EOF
+home="$(getent passwd "$user" | cut -d: -f6)"
+login_shell="$(getent passwd "$user" | cut -d: -f7)"
+dest="$home/.config/fish/conf.d/ssh-session-menu.fish"
+if [ "$(basename "$login_shell")" != fish ]; then
+  step "ssh menu: skipped, $user's login shell is $login_shell, not fish (chsh -s /usr/bin/fish $user, then rerun)"
+elif [ -f "$dest" ] && [ "$(cat "$dest")" = "$MENU" ]; then
+  step "ssh menu: already installed at $dest"
+else
+  step "ssh menu -> $dest"
+  [ -f "$dest" ] && cp -a "$dest" "$dest.bak-$(date +%F)"
+  install -d -o "$user" -g "$(id -gn "$user")" "$home/.config" "$home/.config/fish" "$home/.config/fish/conf.d"
+  printf '%s\n' "$MENU" > "$dest"
+  chown "$user:$(id -gn "$user")" "$dest"; chmod 644 "$dest"
+fi
 
 # 3. MagicDNS: resolved + NetworkManager wiring
 stub=/run/systemd/resolve/stub-resolv.conf
