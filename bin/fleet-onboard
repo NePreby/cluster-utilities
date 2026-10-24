@@ -77,15 +77,8 @@ dig_ok() { dig +time=2 +tries=2 "$@" archlinux.org 2>/dev/null | grep -q 'status
 dns_ok() { getent hosts archlinux.org >/dev/null 2>&1 && dig_ok; }
 wait_dns() { local i; for i in $(seq 1 15); do dns_ok && return 0; sleep 1; done; return 1; }
 
-# Ask for the auth key up front (hidden, never in argv/history), so the rest runs unattended.
 keyfile=""
 trap '[ -z "$keyfile" ] || rm -f "$keyfile"' EXIT
-if [ "$authkey" = 1 ]; then
-  keyfile="$(mktemp)"; chmod 600 "$keyfile"
-  read -rsp "Tailscale auth key (input hidden): " key </dev/tty; echo
-  case "$key" in tskey-*) ;; *) echo "that doesn't look like a tskey-… auth key" >&2; exit 1 ;; esac
-  printf '%s' "$key" > "$keyfile"; unset key
-fi
 
 # 1. hostname
 if [ -n "$newname" ] && [ "$(hostnamectl --static)" != "$newname" ]; then
@@ -103,12 +96,24 @@ pacman -Syu --needed --noconfirm tailscale openssh git rsync tmux fish bind
 step "enable sshd + tailscaled"
 systemctl enable --now sshd
 systemctl enable tailscaled
-if [ ! -d /sys/module/tun ]; then
+# loaded module, or TUN built into the kernel (no /sys/module entry then)
+tun_ok() { [ -d /sys/module/tun ] || zgrep -qx 'CONFIG_TUN=y' /proc/config.gz 2>/dev/null; }
+if ! tun_ok; then
   echo "!! The kernel was upgraded and the tun module can't be loaded until you reboot." >&2
   echo "   Reboot, then rerun fleet-onboard (sshd and tailscaled will start at boot)." >&2
   exit 1
 fi
 systemctl start tailscaled
+
+# Ask for the auth key now (hidden, never in argv/history): after the upgrade and the tun check, so a
+# "reboot, then rerun" stop doesn't throw away a key you just typed. The rest runs unattended.
+if [ "$authkey" = 1 ]; then
+  keyfile="$(mktemp)"; chmod 600 "$keyfile"
+  read -rsp "Tailscale auth key (input hidden): " key </dev/tty; echo
+  case "$key" in tskey-*) ;; *) echo "that doesn't look like a tskey-… auth key" >&2; exit 1 ;; esac
+  printf '%s' "$key" > "$keyfile"; unset key
+fi
+
 
 # 3. SSH login menu. Source of truth: linux-config home/dot_config/fish/conf.d/ssh-session-menu.fish
 # (private repo, so a fresh box can't fetch it). Embedded copy; if you change the menu there, re-paste it here.
