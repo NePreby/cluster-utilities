@@ -9,17 +9,22 @@
 #   unsaved work (any of these means: do NOT delete this copy)
 #   NOGIT        not a git repo (only copy, unless you've backed it up)
 #   NESTED:n     a non-git dir holding n git repos; each also gets its own row (e.g. kirby/katam)
-#   NOREMOTE     git repo with no remote (commits exist only here)
-#   UNPUSHED:n   commits reachable from local branches, tags or HEAD that no remote-tracking ref has
+#   NOREMOTE     no remote at all          LOCALREMOTE  remotes, but none on a forge (github.com etc.):
+#                                                       a fleet box or local path isn't a backup
+#   UNPUSHED:n   commits reachable from any local ref (branches, tags, notes, replace, every worktree's
+#                HEAD) that no forge remote's tracking refs contain
 #   DETACHED     HEAD is detached (its commits are included in UNPUSHED)
 #   DIRTY:n      modified tracked files (incl. submodule changes)   UNTRACKED:n  untracked, not ignored
 #   STASH:n      stash entries
-#   IGNORED:n    gitignored files/dirs, minus regenerables (.venv, __pycache__, node_modules, caches).
+#   IGNORED:n    gitignored files/dirs, minus regenerables (.venv, venv, __pycache__, node_modules,
+#                pytest/mypy/ruff caches, .tox/.nox, *.egg-info).
 #                Usually DATA: copy it to the owner host before deleting. --size adds their du.
 #   WORKTREES:n  linked worktrees (their dirty/untracked are counted in; deleting this repo breaks them)
 #   SUBMODULES:n initialized submodules (their unpushed/dirty/untracked/stash are counted in)
-#   LOCALREMOTE  a remote is a local path or another fleet host, not a real backup
-#   FETCHFAIL    --fetch failed, so UNPUSHED/BEHIND come from stale refs
+#   HIDDENIDX:n  files marked assume-unchanged / skip-worktree (on disk): status can't see their edits
+#   LFS:n        Git LFS file contents stored locally; the server may not have them all
+#   SUBMODULE-NOBACKUP:path   a submodule with no forge remote
+#   FETCHFAIL    --fetch of a forge remote failed, so UNPUSHED/BEHIND come from stale refs
 #   ERR          a git command failed; the counts for this repo can't be trusted
 #   LOOSE:n      files/symlinks sitting directly in a root (not in any repo dir)
 #   info
@@ -121,15 +126,23 @@ read -r -d '' SCAN <<'EOF'
 fetch=$1; size=$2; shift 2
 set -o pipefail
 shopt -s nullglob dotglob
-export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15'
-REGEN='(^|/)(\.venv|venv|env|__pycache__|node_modules|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.ipynb_checkpoints|\.tox|\.nox|\.cache|[^/]*\.egg-info|\.DS_Store)/?$'
+# GIT_NO_REPLACE_OBJECTS: walk the real history; replace refs themselves are still counted via --all
+export GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1
+export GIT_SSH_COMMAND="${FLEET_AUDIT_GIT_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=15}"
+# Ignored dirs assumed regenerable (not counted in IGNORED). Keep this list to things that can be
+# rebuilt from the repo; .ipynb_checkpoints, .cache and env/ are NOT here because they can hold the
+# only copy of something (fleet/README.md lists these too).
+REGEN='(^|/)(\.venv|venv|__pycache__|node_modules|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.nox|[^/]*\.egg-info|\.DS_Store)/?$'
+# Only these hosts count as an independent backup. A remote on a fleet box (user@lab:…, ssh://lab/…),
+# a local path or anything else is not, and gets LOCALREMOTE if it's all the repo has.
+FORGES=" ${FLEET_AUDIT_FORGES:-github.com gitlab.com git.overleaf.com bitbucket.org codeberg.org} "
 g() { local d=$1; shift; git --no-optional-locks -C "$d" "$@"; }
 lines() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l; }
 
 # add one worktree's status into dirty/unt/ign (+ ignpaths); 1 on git error
 count_status() {
   local d=$1 out line p
-  out=$(g "$d" status --porcelain --untracked-files=normal --ignored=matching --ignore-submodules=none) || return 1
+  out=$(g "$d" -c core.quotePath=false status --porcelain --untracked-files=normal --ignored=matching --ignore-submodules=none) || return 1
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     case "$line" in
@@ -141,12 +154,70 @@ count_status() {
   done <<<"$out"
 }
 
-# commits not on any remote-tracking ref: local branches + tags + HEAD
+# host part of a git URL (lowercased); empty for a local path
+url_host() {
+  local u=$1 h
+  case "$u" in
+    file://*|/*|./*|../*|~*) return ;;
+    *://*) h=${u#*://}; h=${h%%/*}; h=${h##*@}; h=${h%%:*} ;;
+    *:*) h=${u%%:*}; h=${h##*@} ;;          # scp-style [user@]host:path
+    *) return ;;
+  esac
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+# remotes of repo $1 whose configured AND effective (insteadOf-rewritten) URL are on a forge
+backup_remotes() {
+  local d=$1 r u e rs
+  rs=$(g "$d" remote) || return 1
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    u=$(g "$d" config --get "remote.$r.url") || continue
+    e=$(g "$d" remote get-url "$r") || return 1
+    if [[ "$FORGES" == *" $(url_host "$u") "* && "$FORGES" == *" $(url_host "$e") "* ]]; then echo "$r"; fi
+  done <<<"$rs"
+  return 0
+}
+
+# --fetch: fetch each backup remote by name (a `fetch --all` silently skips remotes with
+# skipFetchAll), pruning deleted branches. 1 if any fetch failed.
+fetch_backups() {
+  local d=$1 r rc=0
+  for r in $2; do
+    timeout 90 git --no-optional-locks -C "$d" fetch --prune -q "$r" </dev/null >/dev/null 2>&1 || rc=1
+  done
+  return $rc
+}
+
+# commits reachable from ANY local ref (branches, tags, notes, replace, refs/original, every
+# worktree's HEAD; not stash, counted separately) that no backup remote's tracking refs contain.
+# Refs under refs/remotes/ of remotes that aren't backups (or no longer exist) prove nothing.
 count_unpushed() {
-  local d=$1 heads=(--branches --tags) n
-  g "$d" rev-parse -q --verify HEAD >/dev/null 2>&1 && heads+=(HEAD)
-  n=$(g "$d" rev-list --count "${heads[@]}" --not --remotes) || return 1
+  local d=$1 nots=() r n
+  for r in $2; do nots+=("--remotes=$r"); done
+  n=$(g "$d" rev-list --count --exclude='refs/remotes/*' --exclude=refs/stash --all --not "${nots[@]}") || return 1
   unp=$((unp+n))
+}
+
+# index entries whose edits git status won't show: assume-unchanged (lowercase tag) on any file,
+# skip-worktree (S) on a file that is actually on disk (sparse-checkout leaves those absent)
+count_hidden() {
+  local d=$1 out line
+  out=$(g "$d" -c core.quotePath=false ls-files -v) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      [a-z]\ *) hid=$((hid+1)) ;;
+      S\ *) [ -e "$d/${line#S }" ] && hid=$((hid+1)) ;;
+    esac
+  done <<<"$out"
+}
+
+# LFS file contents stored locally (the server may not have them if a push skipped the LFS hook)
+count_lfs() {
+  local gd
+  gd=$(g "$1" rev-parse --path-format=absolute --git-common-dir) || return 1
+  [ -d "$gd/lfs/objects" ] && lfs=$((lfs+$(find "$gd/lfs/objects" -type f | wc -l)))
+  return 0
 }
 
 # fields are \x1f-separated and never empty (bash `read` would shift them otherwise)
@@ -154,30 +225,23 @@ emit() { printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${1:--}" "${2:--}" "${3:--
 
 scan_repo() {
   local root=$1 n=$2 repo=$3
-  local url=- br sz=- err=0 dirty=0 unt=0 ign=0 unp=0 beh=0 st=0 wts=0 nsub=0 fetchfail=0 localrem=0
-  local ignpaths=() flags=() remotes r u wt line s
+  local url=- br sz=- err=0 dirty=0 unt=0 ign=0 unp=0 beh=0 st=0 wts=0 nsub=0 hid=0 lfs=0 fetchfail=0
+  local ignpaths=() flags=() remotes backups r u wt line s p
   remotes=$(g "$repo" remote) || err=1
+  backups=$(backup_remotes "$repo") || err=1
   if [ -n "$remotes" ]; then
-    url=$(g "$repo" remote get-url "$(head -1 <<<"$remotes")" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##') || err=1
-    while IFS= read -r r; do
-      # the URL as configured (not insteadOf-rewritten): that's what says where the backup lives
-      u=$(g "$repo" config --get "remote.$r.url") || { err=1; continue; }
-      case "$u" in
-        *://*) case "$u" in file://*) localrem=1 ;; esac ;;   # https://, ssh://
-        *@*:*) ;;                                            # scp-style user@host:path (GitHub etc.)
-        *) localrem=1 ;;                                     # /path, ../path, or host:path (a fleet box)
-      esac
-    done <<<"$remotes"
-    if [ "$fetch" = 1 ]; then
-      timeout 90 git --no-optional-locks -C "$repo" fetch --all --prune -q </dev/null >/dev/null 2>&1 || fetchfail=1
-    fi
+    r=$(head -1 <<<"${backups:-$remotes}")
+    url=$(g "$repo" config --get "remote.$r.url" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##') || err=1
   fi
+  if [ "$fetch" = 1 ] && [ -n "$backups" ]; then fetch_backups "$repo" "$backups" || fetchfail=1; fi
   if br=$(g "$repo" symbolic-ref -q --short HEAD); then :; else
     if [ $? -eq 1 ]; then br=DETACHED; flags+=(DETACHED); else br=?; err=1; fi
   fi
 
   count_status "$repo" || err=1
-  [ -n "$remotes" ] && { count_unpushed "$repo" || err=1; }
+  count_hidden "$repo" || err=1
+  count_lfs "$repo" || err=1
+  [ -n "$backups" ] && { count_unpushed "$repo" "$backups" || err=1; }
   if g "$repo" rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
     beh=$(g "$repo" rev-list --count 'HEAD..@{u}') || { beh=0; err=1; }
   fi
@@ -188,7 +252,7 @@ scan_repo() {
   while IFS= read -r line; do
     case "$line" in worktree\ *) p=${line#worktree }
       [ "$p" = "$(realpath "$repo")" ] && continue
-      wts=$((wts+1)); [ -d "$p" ] && { count_status "$p" || err=1; } ;;
+      wts=$((wts+1)); [ -d "$p" ] && { count_status "$p" || err=1; count_hidden "$p" || err=1; } ;;
     esac
   done <<<"$wt"
 
@@ -198,11 +262,18 @@ scan_repo() {
     [ -z "$p" ] && continue
     nsub=$((nsub+1))
     count_status "$p" || err=1
-    count_unpushed "$p" || err=1
+    count_hidden "$p" || err=1
+    count_lfs "$p" || err=1
+    u=$(backup_remotes "$p") || err=1
+    if [ -z "$u" ]; then flags+=("SUBMODULE-NOBACKUP:${p#"$repo"/}")
+    else
+      if [ "$fetch" = 1 ]; then fetch_backups "$p" "$u" || fetchfail=1; fi
+      count_unpushed "$p" "$u" || err=1
+    fi
     u=$(g "$p" stash list) || err=1; st=$((st+$(lines "$u")))
   done <<<"$s"
 
-  [ -z "$remotes" ] && flags+=(NOREMOTE)
+  if [ -z "$remotes" ]; then flags+=(NOREMOTE); elif [ -z "$backups" ]; then flags+=(LOCALREMOTE); fi
   [ "$unp" -gt 0 ] && flags+=("UNPUSHED:$unp")
   [ "$dirty" -gt 0 ] && flags+=("DIRTY:$dirty")
   [ "$unt" -gt 0 ] && flags+=("UNTRACKED:$unt")
@@ -210,7 +281,8 @@ scan_repo() {
   [ "$ign" -gt 0 ] && flags+=("IGNORED:$ign")
   [ "$wts" -gt 0 ] && flags+=("WORKTREES:$wts")
   [ "$nsub" -gt 0 ] && flags+=("SUBMODULES:$nsub")
-  [ "$localrem" = 1 ] && flags+=(LOCALREMOTE)
+  [ "$hid" -gt 0 ] && flags+=("HIDDENIDX:$hid")
+  [ "$lfs" -gt 0 ] && flags+=("LFS:$lfs")
   [ "$fetchfail" = 1 ] && flags+=(FETCHFAIL)
   [ "$err" = 1 ] && flags+=(ERR)
   [ "$beh" -gt 0 ] && flags+=("BEHIND:$beh")

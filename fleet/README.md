@@ -18,27 +18,51 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
 2. **Repos live in `~/Projects`.** `~/code` is legacy and being emptied (fleet-audit flags it as LEGACY).
 3. **Before deleting a copy**, all of these must hold:
    - a `fleet-audit --fetch --all` run ends with every host `audited` and exits 0. A host marked
-     `NOT AUDITED` or `INCOMPLETE` proves nothing, because a missing row is not a clean row;
-   - the copy's row is **present** and shows `ok`, or only info flags (BEHIND, UNLISTED/MISPLACED,
-     LEGACY). Any of NOGIT, NESTED, NOREMOTE, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, IGNORED,
-     WORKTREES, SUBMODULES, LOCALREMOTE, FETCHFAIL or ERR means it holds something not saved elsewhere;
-   - for `IGNORED:n` (usually the data), the ignored files are copied to the owner host and verified as
-     in "Moving gitignored data" below. Git can't vouch for them.
-   Deleting a whole root (e.g. `~/code`) also needs no `LOOSE:n` row for it.
+     `NOT AUDITED` or `INCOMPLETE` proves nothing, because a missing row is not a clean row. (A
+     `skipped host` line is fine only if that host isn't the one you're deleting from.)
+   - the copy's row is **present** and shows `ok`, or only these info flags: BEHIND, MISPLACED,
+     UNLISTED, LEGACY, EMPTY (an empty dir: `rmdir` it). `UNDECIDED` means decide the owner first.
+   - **Stop flags.** Any of these means the copy holds something not saved elsewhere: NOGIT, NESTED,
+     NOREMOTE, LOCALREMOTE, SUBMODULE-NOBACKUP, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, HIDDENIDX,
+     LFS, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then re-run:
+     - `IGNORED:n` (usually the data): copy and verify it as in "Moving gitignored data" below.
+       Git can't vouch for it.
+     - `LFS:n`: run `git lfs push --all <forge-remote>` (it uploads only what the server lacks) and
+       check that it exits 0, or keep the copy.
+     - `HIDDENIDX:n`: `git ls-files -v | grep -E '^([a-z]|S) '` lists the files. Clear the bit
+       (`git update-index --no-assume-unchanged / --no-skip-worktree <f>`) and commit any real edit.
+   - Deleting a whole root (e.g. `~/code`) also needs no `LOOSE:n` row for it.
+
+   **What counts as "saved elsewhere":** only a remote on a forge (github.com, gitlab.com,
+   git.overleaf.com, bitbucket.org, codeberg.org), checked by both its configured and its rewritten
+   URL. A copy on another fleet box (`user@lab:…`, `ssh://lab/…`) or a local path is not a backup.
+
+   **Not counted as rebuildable** (so they show up as IGNORED): `.ipynb_checkpoints`, `.cache`,
+   `env/`. Only `.venv`, `venv`, `__pycache__`, `node_modules`, pytest/mypy/ruff caches, `.tox`/`.nox`
+   and `*.egg-info` are skipped.
+
+   **Out of scope**, so deleting a copy loses these:
+   - reflog-only commits (work you already reset or amended away);
+   - annotated tag objects you never pushed, when they point at a commit that *is* pushed;
+   - git-annex content.
+
+   If any of that matters for a repo, keep a full copy (`tar` or `git bundle create x.bundle --all`).
 
 ## Moving gitignored data to the owner host
 
 `rsync --ignore-existing` + "compare sizes" is NOT enough: it keeps an older, different file at the
 destination, and equal sizes don't mean equal contents. Instead:
 ```bash
+# 0. stop anything still writing to the data
 # 1. copy into a separate staging dir, so nothing on the destination is overwritten
 rsync -aP <repo>/data/ lab:Projects/<repo>/_incoming-from-laptop/data/
-# 2. verify by checksum: prints nothing when every file arrived identical
-rsync -anci <repo>/data/ lab:Projects/<repo>/_incoming-from-laptop/data/
+# 2. verify by checksum. Success = exit status 0 AND no output. Any listed file differs: re-run 1, then 2.
+rsync -anci <repo>/data/ lab:Projects/<repo>/_incoming-from-laptop/data/; echo "exit=$?"
 # 3. on the owner host, merge the staging dir by hand. Where both sides have a file and they differ,
 #    decide which to keep; don't let a tool silently pick.
 ```
-Stop anything still writing to the data first. Only then is the source copy deletable.
+Until it's merged, `_incoming-from-laptop/` shows as UNTRACKED on the owner host. That's the reminder.
+Only after step 2 passes is the source copy's data safe to delete.
 
 ## Adding a lab machine (CachyOS already installed)
 
