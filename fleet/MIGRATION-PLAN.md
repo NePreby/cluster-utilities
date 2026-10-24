@@ -7,6 +7,8 @@ and no stop flags. IGNORED and LFS data need the manual checks the README descri
 
 Counts below are a snapshot. Re-run `bin/fleet-audit --fetch` before starting.
 
+Progress is tracked in issue [#17](https://github.com/yjmantilla/cluster-utilities/issues/17), which also lists items found after this plan was written.
+
 ## Status
 Nothing has been moved or deleted yet. The tooling (fleet-audit, projects.yaml) is done and on `main`.
 
