@@ -75,6 +75,8 @@ hosts_all=$(awk -v US="$US" '
     if (st == "") { err("host " id ": missing status:") }
     else if (st != "active" && st != "planned" && st != "retired") { err("host " id ": status must be active|planned|retired, got " st) }
     if (st == "active" && (ssh == "" || roots == "")) { err("active host " id ": needs ssh: and roots:") }
+    # roots are space-separated, so a path with a space would silently split into bogus roots
+    nr=split(roots, rs, " "); for (i=1; i<=nr; i++) if (rs[i] !~ /^(\/|~)/) err("host " id ": root " rs[i] " must start with / or ~ (roots are space-separated; paths with spaces are not supported)")
     print id US ssh US roots US st; id="" }
   function err(m) { print "hosts.yaml: " m > "/dev/stderr"; bad=1 }
   { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
@@ -132,6 +134,19 @@ done <<<"$proj_tsv"
 read -r -d '' SCAN <<'EOF'
 fetch=$1; size=$2; shift 2
 set -o pipefail
+# all temp files live here and go away on exit, also when `timeout` kills the scan (TERM -> exit -> EXIT trap)
+SCANTMP=$(mktemp -d); trap 'rm -rf "$SCANTMP"' EXIT; trap 'exit 143' TERM INT HUP
+tmpf() { mktemp -p "$SCANTMP"; }
+# 0 only if $1 definitely doesn't exist (ENOENT). A permission error on a parent, or a dangling
+# symlink, is "can't tell", never "absent". Only the END of stat's message is matched: the message
+# also contains the path, which could itself contain the words.
+absent() {
+  local m
+  [ -e "$1" ] && return 1
+  [ -L "$1" ] && return 1
+  m=$(LC_ALL=C stat -- "$1" 2>&1 >/dev/null)
+  [[ "$m" == *": No such file or directory" ]]
+}
 shopt -s nullglob dotglob
 # GIT_NO_REPLACE_OBJECTS: walk the real history; replace refs themselves are still counted via --all
 export GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1
@@ -151,11 +166,11 @@ lines() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l; }
 # copy entry (R/C in the XY code) is followed by one extra record, the source path, which is skipped.
 count_status() {
   local d=$1 tf rec p skip=0 rc=0
-  tf=$(mktemp)
+  tf=$(tmpf)
   # git only WARNS (exit 0) about dirs it can't open, e.g. a root-owned docker/sudo output dir, and the
   # untracked files inside are then missing from the counts. So any stderr output means ERR.
   g "$d" status --porcelain -z --untracked-files=normal --ignored=matching --ignore-submodules=none >"$tf" 2>"$tf.err" || rc=1
-  [ -s "$tf.err" ] && { rc=1; head -c 300 "$tf.err" | sed "s#^#$d: #" >&2; }
+  [ -s "$tf.err" ] && { rc=1; head -c 300 "$tf.err" | awk -v d="$d" '{print d ": " $0}' >&2; }
   while IFS= read -r -d '' rec; do
     if [ "$skip" = 1 ]; then skip=0; continue; fi
     case "$rec" in
@@ -219,14 +234,19 @@ fetch_backups() {
 # Refs of remotes that aren't backups (or no longer exist) never count. Returns 1 on a git error,
 # 2 if a server couldn't be asked (-> FETCHFAIL).
 count_unpushed() {
-  local d=$1 r n adv tf rc=0
-  tf=$(mktemp)
+  local d=$1 r n adv tf rc=0 bad=0
+  tf=$(tmpf)
   if [ "$fetch" = 1 ]; then
     for r in $2; do
       adv=$(timeout 60 git --no-optional-locks -C "$d" ls-remote "$r" </dev/null 2>/dev/null) || { rc=2; continue; }
-      # keep only objects we have locally (rev-list can't negate what it can't read); ^ = "not"
-      cut -f1 <<<"$adv" | sort -u | g "$d" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null \
-        | awk '$2 != "missing" {print "^" $1}' >>"$tf"
+      # An empty advertisement (repo created on the forge, nothing pushed) is valid: nothing to negate.
+      # Keep only objects we have locally (rev-list can't negate what it can't read); ^ = "not".
+      # cat-file errors or warnings (e.g. a corrupt object) -> ERR, never silently dropped.
+      printf '%s\n' "$adv" | awk -F'\t' 'NF && $1 != "" {print $1}' | sort -u >"$tf.in" || bad=1
+      g "$d" cat-file --batch-check='%(objectname) %(objecttype)' <"$tf.in" >"$tf.out" 2>"$tf.err" || bad=1
+      [ -s "$tf.err" ] && { bad=1; head -c 300 "$tf.err" | awk -v d="$d" '{print d ": " $0}' >&2; }
+      awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^(commit|tag|tree|blob)$/ {print "^" $1}' "$tf.out" >>"$tf" || bad=1
+      rm -f "$tf.in" "$tf.out" "$tf.err"
     done
     n=$(g "$d" rev-list --count --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin <"$tf") || { rm -f "$tf"; return 1; }
   else
@@ -236,6 +256,7 @@ count_unpushed() {
   fi
   rm -f "$tf"
   unp=$((unp+n))
+  [ "$bad" = 1 ] && return 1
   return $rc
 }
 
@@ -244,7 +265,7 @@ count_unpushed() {
 # -z: names are never quoted, so a file with a tab or quote in its name is tested under its real name
 count_hidden() {
   local d=$1 tf rec rc=0
-  tf=$(mktemp)
+  tf=$(tmpf)
   g "$d" ls-files -v -z >"$tf" || rc=1
   while IFS= read -r -d '' rec; do
     case "${rec:0:1}" in
@@ -264,9 +285,12 @@ count_lfs() {
   gd=$(g "$1" rev-parse --path-format=absolute --git-common-dir) || return 1
   st=$(g "$1" config --get lfs.storage) || st="lfs"
   case "$st" in /*) ;; ~*) st="$HOME${st#\~}" ;; *) st="$gd/$st" ;; esac
-  [ -e "$st/objects" ] || return 0
-  local tf frc; tf=$(mktemp)
-  find "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
+  # no store only on a definite ENOENT; EACCES on $st (or above) or a dangling objects symlink -> ERR
+  absent "$st/objects" && return 0
+  [ -e "$st/objects" ] || return 1
+  local tf frc; tf=$(tmpf)
+  # -H: follow objects itself if it's a symlink (a plain find would list the link, not the store)
+  find -H "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
   n=$(wc -c <"$tf"); rm -f "$tf"
   [ "$frc" = 0 ] || return 1
   lfs=$((lfs+n))
@@ -370,7 +394,7 @@ scan_entry() {   # $1 root as written, $2 display name, $3 abs path
   if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then emit "$root" "$n" - - "$sz" "EMPTY$badname"; return; fi
   # git repos nested inside a non-git dir (kirby/katam): list them and audit each one
   # (find runs into a temp file so its exit status is visible: an unreadable subdir means "can't tell")
-  local nf ferr=""; nf=$(mktemp)
+  local nf ferr=""; nf=$(tmpf)
   find "$d" -mindepth 2 -maxdepth 6 -name .git -print0 -prune >"$nf" 2>/dev/null || ferr=" ERR"
   while IFS= read -r -d '' x; do nested+=("$(dirname "$x")"); done <"$nf"; rm -f "$nf"
   if [ ${#nested[@]} -gt 0 ]; then
@@ -384,10 +408,8 @@ scan_entry() {   # $1 root as written, $2 display name, $3 abs path
 for root in "$@"; do
   r="${root/#\~/$HOME}"; r="${r%/}"
   if [ ! -e "$r" ]; then
-    # only a definite "No such file" is a missing root; EACCES on a parent dir means we can't tell
-    # (message captured first: under pipefail, stat's own exit 1 would fail a `stat | grep` pipeline)
-    msg=$(LC_ALL=C stat -- "$r" 2>&1 >/dev/null)
-    if [[ "$msg" == *"No such file or directory"* ]] && [ ! -L "$r" ]; then
+    # only a definite ENOENT is a missing root; EACCES on a parent dir means we can't tell
+    if absent "$r"; then
       emit "$root" "(root)" - - - ROOT-MISSING
     else
       echo "#ROOTERR $root: can't tell whether it exists (permission denied on a parent, or a broken symlink)"
@@ -455,7 +477,7 @@ for id in "${ran[@]}"; do
     echo "== $id: audited ($n entries)"
     # warnings the scanner hit (the affected rows also carry ERR): never swallow them
     if [ -s "$tmp/$id.err" ]; then
-      echo "   !! scanner warnings on $id (first lines; the affected repos show ERR):"
+      echo "   !! warnings from the $id scan (git warnings also put ERR on the repo concerned):"
       head -5 "$tmp/$id.err" | sed 's/^/      /'
     fi
     # projects registered for this host but not found (only meaningful after a complete scan)

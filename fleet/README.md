@@ -25,18 +25,19 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    - **Stop flags.** Any of these means the copy holds something not saved elsewhere: NOGIT, NESTED,
      NOREMOTE, LOCALREMOTE, SUBMODULE-NOBACKUP, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, HIDDENIDX,
      LFS, REPLACE, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then re-run.
-     `IGNORED` and `LFS` stay on re-runs even when resolved, so for those two, a check you do yourself
-     (and note down) is what clears them:
+     `IGNORED` and `LFS` stay on re-runs, so they need a check you do yourself (and note down):
      - `IGNORED:n` (usually the data): copy and verify it as in "Moving gitignored data" below.
        Git can't vouch for it.
-     - `LFS:n`: the local LFS store stays after a successful upload, so the flag stays too. Run
-       `git lfs push --all <forge-remote>` (it uploads only what the server lacks). If that exits 0,
-       the LFS content is safe and this flag no longer blocks deleting *that* copy. Don't empty the
-       store just to make the flag go away.
+     - `LFS:n`: **keep the copy, or archive the whole repo directory first** (the tar recipe below,
+       including the `tar -df` check). A successful `git lfs push --all` is NOT enough: `lfs.url` can
+       send the upload somewhere other than the forge, and it skips LFS objects no commit points to
+       (e.g. a file staged and then reset). Both still exit 0. Don't empty the store to make the flag
+       go away.
      - `HIDDENIDX:n`: `git ls-files -v | grep -E '^([a-z]|S) '` lists the files. Clear the bit
        (`git update-index --no-assume-unchanged / --no-skip-worktree <f>`) and commit any real edit.
-     - `REPLACE:n`: `git for-each-ref refs/replace` lists them. If a replacement holds content you
-       want, commit that content normally. Then `git replace -d <ref>` and re-run.
+     - `REPLACE:n`: `git replace -l` lists the replaced objects. If a replacement holds content you
+       want, commit that content normally. Then `git replace -d <sha>` (the replaced object's sha, as
+       `git replace -l` prints it) and re-run.
    - Deleting a whole root (e.g. `~/code`) also needs no `LOOSE:n` row for it.
 
    **What counts as "saved elsewhere":** only a remote on a forge (github.com, gitlab.com,
@@ -53,10 +54,15 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    - git-annex content.
 
    If any of that matters for a repo, archive the **whole repo directory** before deleting it,
-   `.git` included (that's where the reflog, LFS store and annex objects live), and check the archive:
+   `.git` included (that's where the reflog, LFS store and annex objects live), and check the archive
+   against the disk:
    ```bash
-   tar -C <parent> -czf <repo>-$(date +%F).tar.gz <repo> && tar -tzf <repo>-$(date +%F).tar.gz >/dev/null && echo OK
+   cd <parent-of-repo>                        # not inside the repo: tar would read its own output
+   a=~/archives/<repo>-$(date +%F).tar.gz     # outside every fleet root (or fleet-audit flags it LOOSE)
+   mkdir -p ~/archives && tar -czf "$a" <repo> && tar -dzf "$a" && echo VERIFIED
    ```
+   `tar -d` compares the archive with the files on disk. Only `VERIFIED` (exit 0, no differences)
+   counts. Then copy the archive somewhere that isn't this machine before deleting the repo.
    `git bundle --all` is **not** a full copy: it leaves out reflog-only commits and anything outside git
    objects (LFS, annex).
 
@@ -145,17 +151,22 @@ some host was not, and 2 means a usage or inventory error.
 `UNPUSHED` counts commits reachable from any local ref (branches, tags, notes, replace refs, every
 worktree's HEAD; not the stash) that the forge remotes don't have. With `--fetch`, "have" means the
 server advertises it right now (`git ls-remote`). A branch that was squash-merged and then deleted on
-GitHub shows up here too. To see the actual commits before assuming work is at risk (forge remote
-`origin` here):
+GitHub shows up here too. To see the actual commits before assuming work is at risk, ask the
+server the same way the tool does (forge remote `origin` here). Don't use `--not --remotes=origin`,
+because cached tracking refs can be stale:
 ```bash
 git fetch --prune origin
-git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --not --remotes=origin
+git ls-remote origin | awk -F'\t' 'NF {print $1}' | git cat-file --batch-check='%(objectname) %(objecttype)' \
+  | awk '$2 ~ /^(commit|tag|tree|blob)$/ {print "^" $1}' \
+  | git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin
 ```
 
 Keep `hosts.yaml` / `projects.yaml` in their flat format, because they are read with awk. Inline
-`# comments` are fine. In `hosts.yaml`, any line the parser doesn't understand (a tab, a host id at
-column 0, a stray top-level key, a missing status) stops the run with exit 2 before anything is
-scanned. In `projects.yaml` it's a warning.
+`# comments` are fine. In `hosts.yaml`, any line the parser doesn't understand stops the run with
+exit 2 before anything is scanned. That covers a tab in the indentation or content (trailing whitespace
+and comments are stripped first), a host id at column 0, a stray top-level key, a missing status, and a
+root that doesn't start with `/` or `~`. Roots are space-separated, so a path with spaces isn't
+supported. In `projects.yaml` it's a warning.
 
 ## Auth notes
 
