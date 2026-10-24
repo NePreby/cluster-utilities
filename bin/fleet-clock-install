@@ -15,5 +15,7 @@ install -m 644 -o root -g root "$here/fleet/systemd/clock-from-https.service" \
 systemctl daemon-reload
 systemctl enable --now clock-from-https.timer >/dev/null
 systemctl start clock-from-https.service || true   # exit 1 = sources disagreed / offline; the timer retries
-echo "== $(hostname): $(journalctl -u clock-from-https.service -n 1 --no-pager -o cat)"
-echo "   timer: $(systemctl is-enabled clock-from-https.timer), next run $(systemctl show clock-from-https.timer -p NextElapseUSecRealtime --value)"
+last=$(journalctl -u clock-from-https.service -n 20 --no-pager -o cat \
+  | grep -vE '^(Starting|Finished|clock-from-https\.service: )' | tail -1)
+echo "== $(hostname): $last"
+echo "   timer: $(systemctl is-enabled clock-from-https.timer), next run $(systemctl list-timers clock-from-https.timer --no-legend | awk '{print $1, $2, $3}')"
