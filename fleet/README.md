@@ -9,6 +9,7 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
 | `projects.yaml` | Placement: which host owns each project (one host, except shared infra) |
 | `../bin/fleet-onboard` | Run **on a new machine** to put it on the tailnet with sshd |
 | `../bin/fleet-audit` | Run **from the laptop**: every repo on every host, with anything unsaved or misplaced |
+| `ONBOARDING-AGENT.md` | Handoff for an agent (or you) adding a lab machine: who does what, checks, troubleshooting |
 
 ## The rules
 
