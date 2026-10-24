@@ -25,8 +25,9 @@
 #   HIDDENIDX:n  files marked assume-unchanged / skip-worktree (on disk): status can't see their edits
 #   LFS:n        Git LFS file contents stored locally (honours lfs.storage); the server may not have
 #                them all. Re-running doesn't clear it: see fleet/README.md
-#   LFS-EXTERNAL that LFS store lives outside this repo's directory (absolute lfs.storage, symlinked
-#                objects, linked worktree), so archiving the repo dir wouldn't include it
+#   LFS-EXTERNAL that LFS store, or part of it, lives outside this repo's directory (absolute
+#                lfs.storage, a symlinked objects dir, symlinked shards/objects inside it, a linked
+#                worktree), so archiving the repo dir wouldn't include it
 #   REPLACE:n    refs/replace/* entries; a replaced blob holds content no commit count sees
 #   SUBMODULE-NOBACKUP:path   a submodule with no forge remote
 #   FETCHFAIL    --fetch of a forge remote failed, so UNPUSHED/BEHIND come from stale refs
@@ -298,13 +299,18 @@ count_lfs() {
   # no store only on a definite ENOENT; EACCES on $st (or above) or a dangling objects symlink -> ERR
   absent "$st/objects" && return 0
   [ -e "$st/objects" ] || return 1
-  local tf frc; tf=$(tmpf)
-  # -H: follow objects itself if it's a symlink (a plain find would list the link, not the store)
-  find -H "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
+  local tf frc links; tf=$(tmpf)
+  # -L: count what git-lfs can actually read, through symlinked shard dirs or objects too. A dangling
+  # or looping link makes find fail -> ERR.
+  find -L "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
   n=$(wc -c <"$tf"); rm -f "$tf"
   [ "$frc" = 0 ] || return 1
+  # any symlink INSIDE the store (a shard dir or object moved to another disk): tar archives the link,
+  # not the content, so treat it like an external store
+  links=$(find -H "$st/objects" -mindepth 1 -type l -print -quit 2>/dev/null) || return 1
   lfs=$((lfs+n))
-  if [ "$n" -gt 0 ]; then
+  if [ "$n" -gt 0 ] || [ -n "$links" ]; then
+    [ -n "$links" ] && lfsext=1
     real=$(realpath -e -- "$st/objects") || return 1
     top=$(realpath -e -- "$2") || return 1
     [[ "$real/" == "$top/"* ]] || lfsext=1
@@ -446,7 +452,8 @@ done
 echo '#DONE'
 EOF
 
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d) || { echo "fleet-audit: mktemp -d failed" >&2; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
 tmo=600; [ "$fetch" = 1 ] && tmo=1800; tmo=${FLEET_AUDIT_TIMEOUT:-$tmo}   # per-host scan timeout (s)
 ran=()
 while IFS="$US" read -r id ssh roots; do

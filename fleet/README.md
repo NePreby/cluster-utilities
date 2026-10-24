@@ -32,7 +32,10 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
      - `LFS:n`: **keep the copy, or archive the whole repo directory first** with the recipe below,
        but only if the row has **no `LFS-EXTERNAL`**. That flag means the LFS store lives outside the
        repo directory (an absolute `lfs.storage`, a symlinked `objects` dir, or a linked worktree using
-       the main repo's store), so the archive wouldn't contain it: keep the copy. A successful
+       the main repo's store, or symlinked shards/objects inside the store), so the archive wouldn't
+       contain it: keep the copy. Or also archive the store itself with the same recipe (`cd` to its
+       parent, archive the store dir). The objects then have their own verified copy, which you note
+       down next to the repo's archive. A successful
        `git lfs push --all` is NOT enough either: `lfs.url` can send the upload somewhere other than the
        forge, and it skips LFS objects no commit points to (e.g. a file staged and then reset). Both
        still exit 0. Don't empty the store to make the flag go away.
@@ -59,22 +62,27 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    If any of that matters for a repo, archive the **whole repo directory** before deleting it,
    `.git` included (that's where the reflog, LFS store and annex objects live). Each archive goes in its
    own new directory, so archiving `~/code/x` and `~/Projects/x` on the same day can't overwrite each
-   other:
+   other. **Bash syntax**: your login shell is fish, so run `bash` first.
    ```bash
-   # 0. stop anything still writing to the repo (jobs, editors, agents)
+   # 0. stop anything still writing to the repo (jobs, editors, agents). tar -d below catches files that
+   #    CHANGE after the archive is made, but not files ADDED afterwards.
    cd <parent-of-repo>                       # not inside the repo: tar would read its own output
    mkdir -p ~/archives                       # outside every fleet root (or fleet-audit flags it LOOSE)
    d=$(mktemp -d ~/archives/"$(hostname)-<repo>-$(date +%F)-XXXXXX")
    printf 'host=%s\nsource=%s\n' "$(hostname)" "$PWD/<repo>" > "$d/SOURCE"
    tar -czf "$d/<repo>.tar.gz" <repo> && tar -dzf "$d/<repo>.tar.gz" \
      && (cd "$d" && sha256sum <repo>.tar.gz > SHA256SUMS) && echo "VERIFIED: $d"
-   # copy that directory to ANOTHER machine (its name is unique; --ignore-existing never replaces
-   # anything there) and check the checksum on arrival
-   rsync -a --ignore-existing "$d" <other-host>:archives/ \
-     && ssh <other-host> "cd archives/$(basename "$d") && sha256sum -c SHA256SUMS"
+   # copy that directory to ANOTHER machine. Refuse if the name already exists there (the random suffix
+   # is only unique on THIS machine), then check the bytes that arrived against THIS machine's hash.
+   # A copied SHA256SUMS would only prove the remote is consistent with itself.
+   b=$(basename "$d"); h=$(cut -d' ' -f1 "$d/SHA256SUMS")
+   ssh <other-host> "mkdir -p archives && test ! -e archives/$b" \
+     && rsync -a "$d" <other-host>:archives/ \
+     && [ "$(ssh <other-host> "sha256sum archives/$b/<repo>.tar.gz" | cut -d' ' -f1)" = "$h" ] \
+     && echo "COPY OK: <other-host>:archives/$b" || echo "!! copy NOT verified: don't delete"
    ```
-   `tar -d` compares the archive with the files on disk. Delete the repo only after **both** `VERIFIED`
-   and `<repo>.tar.gz: OK` from the other machine.
+   `tar -d` compares the archive with the files on disk. Delete the repo only after **both**
+   `VERIFIED` and `COPY OK`. (The remote commands also work when the other host's shell is fish.)
    `git bundle --all` is **not** a full copy: it leaves out reflog-only commits and anything outside git
    objects (LFS, annex).
 
@@ -172,7 +180,8 @@ because cached tracking refs can be stale:
 git fetch --prune origin && adv=$(git ls-remote origin) && printf '%s\n' "$adv" \
   | awk -F'\t' 'NF {print $1}' | git cat-file --batch-check='%(objectname) %(objecttype)' \
   | awk '$2 ~ /^(commit|tag|tree|blob)$/ {print "^" $1}' \
-  | git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin
+  | git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin \
+  || echo "!! couldn't ask origin (fetch or ls-remote failed): no answer, NOT 'nothing unpushed'"
 ```
 
 Keep `hosts.yaml` / `projects.yaml` in their flat format, because they are read with awk. Inline
