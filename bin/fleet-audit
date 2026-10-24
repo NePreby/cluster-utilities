@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+# Where is every repo, and is anything in it not saved anywhere else?
+#
+# Scans each repo root (e.g. ~/Projects, ~/code) on every ACTIVE host in fleet/hosts.yaml, over
+# `ssh -o BatchMode=yes` (or locally for `ssh: local`), and checks each entry against
+# fleet/projects.yaml. Read-only (git runs with --no-optional-locks), except that --fetch runs
+# `git fetch --prune <remote>` for each forge remote. One row per entry that has something to act on:
+#
+#   unsaved work (any of these means: do NOT delete this copy)
+#   NOGIT        not a git repo (only copy, unless you've backed it up)
+#   NESTED:n     a non-git dir holding n git repos; each also gets its own row (e.g. kirby/katam)
+#   NOREMOTE     no remote at all          LOCALREMOTE  remotes, but none on a forge (github.com etc.):
+#                                                       a fleet box or local path isn't a backup
+#   UNPUSHED:n   commits reachable from any local ref (branches, tags, notes, replace, every worktree's
+#                HEAD) that the forge remotes don't have. With --fetch that means "not among the
+#                SHAs the server advertises right now" (ls-remote); without it, cached tracking refs
+#   DETACHED     HEAD is detached (its commits are included in UNPUSHED)
+#   DIRTY:n      modified tracked files (incl. submodule changes)   UNTRACKED:n  untracked, not ignored
+#   STASH:n      stash entries
+#   IGNORED:n    gitignored files/dirs, minus regenerables (.venv, venv, __pycache__, node_modules,
+#                pytest/mypy/ruff caches, .tox/.nox, *.egg-info).
+#                Usually DATA: copy it to the owner host before deleting. --size adds their du.
+#   WORKTREES:n  linked worktrees (their dirty/untracked are counted in; deleting this repo breaks them)
+#   SUBMODULES:n initialized submodules (their unpushed/dirty/untracked/stash are counted in)
+#   HIDDENIDX:n  files marked assume-unchanged / skip-worktree (on disk): status can't see their edits
+#   LFS:n        Git LFS file contents stored locally (honours lfs.storage); the server may not have
+#                them all. Re-running doesn't clear it: see fleet/README.md
+#   LFS-EXTERNAL that LFS store, or part of it, lives outside this repo's directory (absolute
+#                lfs.storage, a symlinked objects dir, symlinked shards/objects inside it, a linked
+#                worktree), so archiving the repo dir wouldn't include it
+#   REPLACE:n    refs/replace/* entries; a replaced blob holds content no commit count sees
+#   SUBMODULE-NOBACKUP:path   a submodule with no forge remote
+#   FETCHFAIL    --fetch of a forge remote failed, so UNPUSHED/BEHIND come from stale refs
+#   ERR          a git command failed or warned (e.g. a dir it couldn't open); counts can't be trusted
+#   LOOSE:n      files/symlinks sitting directly in a root (not in any repo dir)
+#   info
+#   BEHIND:n     behind upstream (current only with --fetch)    EMPTY  empty dir
+#   UNLISTED / MISPLACED / UNDECIDED   placement vs fleet/projects.yaml
+#   LEGACY       lives in ~/code (being migrated to ~/Projects)    ROOT-MISSING  root doesn't exist
+#
+# A copy is only safe to delete if it shows `ok` in a `fleet-audit --fetch --all` run that ends with
+# every host "audited" (exit 0), and its gitignored data has been copied and verified (fleet/README.md).
+#
+#   fleet-audit                 # problems only, all active hosts
+#   fleet-audit --all           # every entry, including clean + correctly placed ones (as `ok`)
+#   fleet-audit --fetch         # fetch + ask each forge what it has, so UNPUSHED/BEHIND are current
+#   fleet-audit --size          # add du sizes of each repo and of its ignored data (slow)
+#   fleet-audit lab             # only these host ids
+#   FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # per-host time limit (default 600s, 1800s with --fetch)
+# (FLEET_AUDIT_FORGES / FLEET_AUDIT_GIT_SSH are test hooks and only apply to `ssh: local` hosts.)
+#
+# Exit: 0 every requested host fully audited · 1 some host NOT audited / incomplete · 2 usage/config error
+set -uo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+HOSTS="$here/fleet/hosts.yaml"
+PROJECTS="$here/fleet/projects.yaml"
+
+show_all=0; fetch=0; size=0; only=()
+for a in "$@"; do
+  case "$a" in
+    --all) show_all=1 ;; --fetch) fetch=1 ;; --size) size=1 ;;
+    -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+    -*) echo "unknown flag $a" >&2; exit 2 ;;
+    *) only+=("$a") ;;
+  esac
+done
+
+# --- parse hosts.yaml -> "id US ssh US roots US status" for EVERY host (US = \x1f) ---
+# Strict on purpose: the deletion rule trusts "every host audited", so an inventory line the parser
+# doesn't understand is a config error (exit 2), never a host that quietly drops out. Every line is
+# normalized first (CR, inline `# …` comments, trailing whitespace), so `  lab2:   # new box` works.
+# \x1f instead of tabs: bash `read` collapses adjacent tabs, which shifted fields when one was empty.
+US=$'\x1f'
+hosts_all=$(awk -v US="$US" '
+  function flush() {
+    if (id == "") return
+    if (st == "") { err("host " id ": missing status:") }
+    else if (st != "active" && st != "planned" && st != "retired") { err("host " id ": status must be active|planned|retired, got " st) }
+    if (st == "active" && (ssh == "" || roots == "")) { err("active host " id ": needs ssh: and roots:") }
+    # roots are space-separated, so a path with a space would silently split into bogus roots
+    nr=split(roots, rs, " "); for (i=1; i<=nr; i++) if (rs[i] !~ /^(\/|~)/) err("host " id ": root " rs[i] " must start with / or ~ (roots are space-separated; paths with spaces are not supported)")
+    print id US ssh US roots US st; id="" }
+  function err(m) { print "hosts.yaml: " m > "/dev/stderr"; bad=1 }
+  { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+  line == "" { next }
+  # The file is exactly one `hosts:` section. Anything else used to END the section silently, dropping
+  # every host after it (a host id at column 0, a tab-indented stanza, a stray key), so now it is an error.
+  line ~ /\t/ { err("line " NR ": tab character (indent with spaces): " $0); next }
+  line == "hosts:" { if (seenh) err("line " NR ": second hosts: section"); inh=1; seenh=1; next }
+  line ~ /^[^ ]/ { err("line " NR ": unexpected top-level line (only hosts: is allowed): " $0); next }
+  !inh { err("line " NR ": content before hosts:: " $0); next }
+  line ~ /^  [A-Za-z0-9_.-]+:$/ {
+    flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""
+    if (id in seen) err("host " id " defined twice"); seen[id]=1; next }
+  id != "" && line ~ /^    [a-z_]+:/ {
+    key=line; sub(/^    /, "", key); sub(/:.*/, "", key)
+    val=line; sub(/^    [a-z_]+:[[:space:]]*/, "", val)
+    if (key == "ssh") ssh=val; else if (key == "roots") roots=val; else if (key == "status") st=tolower(val)
+    next }
+  { err("line " NR " not understood (expected 2-space host id or 4-space key: value): " $0) }
+  END { flush(); if (!seenh) err("no hosts: section"); exit bad ? 2 : 0 }' "$HOSTS") || { echo "fix fleet/hosts.yaml first (nothing was scanned)" >&2; exit 2; }
+
+hosts_tsv=""; declare -A known=(); skipped=()
+while IFS="$US" read -r id ssh roots st; do
+  [ -z "$id" ] && continue
+  known[$id]=$st
+  if [ "$st" != active ]; then skipped+=("$id ($st)"); continue; fi
+  hosts_tsv+="$id$US$ssh$US$roots"$'\n'
+done <<<"$hosts_all"
+[ -z "$hosts_tsv" ] && { echo "hosts.yaml: no active hosts" >&2; exit 2; }
+for h in "${only[@]}"; do
+  if [ -z "${known[$h]:-}" ]; then echo "unknown host id '$h' (known: ${!known[*]})" >&2; exit 2; fi
+  if [ "${known[$h]}" != active ]; then echo "host '$h' is not active (status: ${known[$h]})" >&2; exit 2; fi
+done
+
+# --- parse projects.yaml -> "name<TAB>host,host" ([*] = every host, [?] = undecided) ---
+proj_tsv=$(awk -v US="$US" '
+  { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+  line == "" || line == "projects:" { next }
+  line ~ /^  [^ #][^:]*:[[:space:]]*\[[^]]*\]$/ {
+    name=line; sub(/^  /, "", name); sub(/:.*/, "", name); gsub(/^["\047]|["\047]$/, "", name)
+    hs=line; sub(/^[^\[]*\[/, "", hs); sub(/\].*/, "", hs); gsub(/[[:space:]]/, "", hs)
+    if (name in seen) { print "projects.yaml:" NR ": duplicate entry " name " (first one wins)" > "/dev/stderr"; next }
+    seen[name]=1; print name US hs; next }
+  { print "projects.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }' "$PROJECTS")
+while IFS="$US" read -r p hs; do
+  IFS=, read -ra hl <<<"$hs"
+  for h in "${hl[@]}"; do
+    case "$h" in '*'|'?') ;; *) [ -n "${known[$h]:-}" ] || echo "projects.yaml: $p lists unknown host id '$h'" >&2 ;; esac
+  done
+done <<<"$proj_tsv"
+
+# --- the per-host scanner (runs under bash on each host; args: fetch size root...) ---
+# Prints one TSV row per entry: root, name, branch, url, size, flags. Last line is `#DONE`: a scan
+# without it was cut short and must not be read as complete.
+read -r -d '' SCAN <<'EOF'
+fetch=$1; size=$2; shift 2
+set -o pipefail
+# all temp files live here and go away on exit. On a TERM (fleet-audit's per-host timeout, local hosts)
+# bash runs the trap once the current command returns, which can be up to a 90 s fetch later. Over ssh
+# the remote scan isn't signalled at all and cleans up when it finishes. Either way the host is already
+# reported NOT AUDITED/INCOMPLETE, so a late cleanup never affects the result.
+SCANTMP=$(mktemp -d) || { echo "scanner: mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$SCANTMP"' EXIT; trap 'exit 143' TERM INT HUP
+tmpf() { mktemp -p "$SCANTMP"; }
+# 0 only if $1 definitely doesn't exist (ENOENT). A permission error on a parent, or a dangling
+# symlink, is "can't tell", never "absent". Only the END of stat's message is matched: the message
+# also contains the path, which could itself contain the words.
+absent() {
+  local m
+  [ -e "$1" ] && return 1
+  [ -L "$1" ] && return 1
+  m=$(LC_ALL=C stat -- "$1" 2>&1 >/dev/null)
+  [[ "$m" == *": No such file or directory" ]]
+}
+shopt -s nullglob dotglob
+# GIT_NO_REPLACE_OBJECTS: walk the real history; replace refs themselves are still counted via --all
+export GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1
+export GIT_SSH_COMMAND="${FLEET_AUDIT_GIT_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=15}"
+# Ignored dirs assumed regenerable (not counted in IGNORED). Keep this list to things that can be
+# rebuilt from the repo; .ipynb_checkpoints, .cache and env/ are NOT here because they can hold the
+# only copy of something (fleet/README.md lists these too).
+REGEN='(^|/)(\.venv|venv|__pycache__|node_modules|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.nox|[^/]*\.egg-info|\.DS_Store)/?$'
+# Only these hosts count as an independent backup. A remote on a fleet box (user@lab:…, ssh://lab/…),
+# a local path or anything else is not, and gets LOCALREMOTE if it's all the repo has.
+FORGES=" ${FLEET_AUDIT_FORGES:-github.com gitlab.com git.overleaf.com bitbucket.org codeberg.org} "
+g() { local d=$1; shift; git --no-optional-locks -C "$d" "$@"; }
+lines() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l; }
+
+# add one worktree's status into dirty/unt/ign (+ ignpaths); 1 on git error.
+# -z (NUL-separated, never quoted) so paths with spaces or odd bytes stay exact for du; a rename or
+# copy entry (R/C in the XY code) is followed by one extra record, the source path, which is skipped.
+count_status() {
+  local d=$1 tf rec p skip=0 rc=0
+  tf=$(tmpf)
+  # git only WARNS (exit 0) about dirs it can't open, e.g. a root-owned docker/sudo output dir, and the
+  # untracked files inside are then missing from the counts. So any stderr output means ERR.
+  g "$d" status --porcelain -z --untracked-files=normal --ignored=matching --ignore-submodules=none >"$tf" 2>"$tf.err" || rc=1
+  [ -s "$tf.err" ] && { rc=1; head -c 300 "$tf.err" | awk -v d="$d" '{print d ": " $0}' >&2; }
+  while IFS= read -r -d '' rec; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$rec" in
+      '?? '*) unt=$((unt+1)) ;;
+      '!! '*) p=${rec#!! }; p=${p%/}
+              if [[ ! "$p" =~ $REGEN ]]; then ign=$((ign+1)); ignpaths+=("$d/$p"); fi ;;
+      *) dirty=$((dirty+1)); [[ "${rec:0:2}" == *[RC]* ]] && skip=1 ;;
+    esac
+  done <"$tf"
+  rm -f "$tf" "$tf.err"
+  return $rc
+}
+
+# host part of a git URL (lowercased); empty for a local path
+url_host() {
+  local u=$1 h
+  case "$u" in
+    file://*|/*|./*|../*|~*) return ;;
+    *://*) h=${u#*://}; h=${h%%/*}; h=${h##*@}; h=${h%%:*} ;;
+    *:*) h=${u%%:*}; h=${h##*@} ;;          # scp-style [user@]host:path
+    *) return ;;
+  esac
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+is_forge() { local h; h=$(url_host "$1"); [ -n "$h" ] && [[ "$FORGES" == *" $h "* ]]; }
+
+# remotes of repo $1 whose configured URL, effective fetch URL (insteadOf) and every push URL
+# (pushurl / pushInsteadOf) are all on a forge
+backup_remotes() {
+  local d=$1 r u e pu rs ok
+  rs=$(g "$d" remote) || return 1
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    u=$(g "$d" config --get "remote.$r.url") || continue
+    e=$(g "$d" remote get-url "$r") || return 1
+    pu=$(g "$d" remote get-url --push --all "$r") || return 1
+    ok=1; is_forge "$u" || ok=0; is_forge "$e" || ok=0
+    while IFS= read -r u; do [ -z "$u" ] || is_forge "$u" || ok=0; done <<<"$pu"
+    if [ "$ok" = 1 ]; then echo "$r"; fi
+  done <<<"$rs"
+  return 0
+}
+
+# --fetch: fetch each backup remote by name (a `fetch --all` silently skips remotes with
+# skipFetchAll), pruning deleted branches. 1 if any fetch failed.
+fetch_backups() {
+  local d=$1 r rc=0
+  for r in $2; do
+    timeout 90 git --no-optional-locks -C "$d" fetch --prune -q "$r" </dev/null >/dev/null 2>&1 || rc=1
+  done
+  return $rc
+}
+
+# commits reachable from ANY local ref (branches, tags, notes, replace, refs/original, every
+# worktree's HEAD; not stash, counted separately) that the backup remotes don't have.
+#  - with --fetch: "have" = the SHAs each server ADVERTISES right now (git ls-remote). Local tracking
+#    refs can be stale in ways fetch never cleans up (a narrowed fetch refspec leaves origin/old
+#    behind; a changed URL keeps the old server's refs), so they aren't evidence.
+#  - without --fetch: the backup remotes' cached tracking refs (fine for a report, not for deleting).
+# Refs of remotes that aren't backups (or no longer exist) never count. Returns 1 on a git error,
+# 2 if a server couldn't be asked (-> FETCHFAIL).
+count_unpushed() {
+  local d=$1 r n adv tf rc=0 bad=0
+  tf=$(tmpf)
+  if [ "$fetch" = 1 ]; then
+    for r in $2; do
+      adv=$(timeout 60 git --no-optional-locks -C "$d" ls-remote "$r" </dev/null 2>/dev/null) || { rc=2; continue; }
+      # An empty advertisement (repo created on the forge, nothing pushed) is valid: nothing to negate.
+      # Keep only objects we have locally (rev-list can't negate what it can't read); ^ = "not".
+      # cat-file errors or warnings (e.g. a corrupt object) -> ERR, never silently dropped.
+      printf '%s\n' "$adv" | awk -F'\t' 'NF && $1 != "" {print $1}' | sort -u >"$tf.in" || bad=1
+      g "$d" cat-file --batch-check='%(objectname) %(objecttype)' <"$tf.in" >"$tf.out" 2>"$tf.err" || bad=1
+      [ -s "$tf.err" ] && { bad=1; head -c 300 "$tf.err" | awk -v d="$d" '{print d ": " $0}' >&2; }
+      awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^(commit|tag|tree|blob)$/ {print "^" $1}' "$tf.out" >>"$tf" || bad=1
+      rm -f "$tf.in" "$tf.out" "$tf.err"
+    done
+    n=$(g "$d" rev-list --count --exclude='refs/remotes/*' --exclude=refs/stash --all --stdin <"$tf") || { rm -f "$tf"; return 1; }
+  else
+    local nots=()
+    for r in $2; do nots+=("--remotes=$r"); done
+    n=$(g "$d" rev-list --count --exclude='refs/remotes/*' --exclude=refs/stash --all --not "${nots[@]}") || { rm -f "$tf"; return 1; }
+  fi
+  rm -f "$tf"
+  unp=$((unp+n))
+  [ "$bad" = 1 ] && return 1
+  return $rc
+}
+
+# index entries whose edits git status won't show: assume-unchanged (lowercase tag) on any file,
+# skip-worktree (S) on a file that is actually on disk (sparse-checkout leaves those absent)
+# -z: names are never quoted, so a file with a tab or quote in its name is tested under its real name
+count_hidden() {
+  local d=$1 tf rec rc=0
+  tf=$(tmpf)
+  g "$d" ls-files -v -z >"$tf" || rc=1
+  while IFS= read -r -d '' rec; do
+    case "${rec:0:1}" in
+      [a-z]) hid=$((hid+1)) ;;
+      S) if [ -e "$d/${rec:2}" ] || [ -L "$d/${rec:2}" ]; then hid=$((hid+1)); fi ;;
+    esac
+  done <"$tf"
+  rm -f "$tf"
+  return $rc
+}
+
+# LFS file contents stored locally (the server may not have them if a push skipped the LFS hook).
+# Storage is <git dir>/lfs unless lfs.storage moves it (relative values are inside the git dir).
+# A store that exists but can't be fully listed is an error, never "0 objects".
+# $2 = the directory a copy of this repo would be archived from. If the resolved store isn't inside it
+# (absolute lfs.storage, a symlinked objects dir, a linked worktree whose store is in the main repo's
+# .git), lfsext=1: archiving that directory would NOT include the LFS content.
+count_lfs() {
+  local gd st n real top
+  gd=$(g "$1" rev-parse --path-format=absolute --git-common-dir) || return 1
+  st=$(g "$1" config --get lfs.storage) || st="lfs"
+  [ -z "$st" ] && st="lfs"   # an empty value would otherwise point at the git object store
+  case "$st" in /*) ;; ~*) st="$HOME${st#\~}" ;; *) st="$gd/$st" ;; esac
+  # no store only on a definite ENOENT; EACCES on $st (or above) or a dangling objects symlink -> ERR
+  absent "$st/objects" && return 0
+  [ -e "$st/objects" ] || return 1
+  local tf frc links; tf=$(tmpf)
+  # Count the regular files physically in the store, at any depth. Links are NOT followed: any symlink
+  # below objects/ (a shard or object moved elsewhere, dangling or looping) is caught by the check below
+  # and makes the row LFS-EXTERNAL, a stop flag, so content behind links is never needed in the count.
+  # -H only follows objects itself if it's a link (its target is checked by the containment test).
+  find -H "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
+  n=$(wc -c <"$tf"); rm -f "$tf"
+  [ "$frc" = 0 ] || return 1
+  # any symlink INSIDE the store (a shard dir or object moved to another disk): tar archives the link,
+  # not the content, so treat it like an external store
+  links=$(find -H "$st/objects" -mindepth 1 -type l -print -quit 2>/dev/null) || return 1
+  lfs=$((lfs+n))
+  if [ "$n" -gt 0 ] || [ -n "$links" ]; then
+    [ -n "$links" ] && lfsext=1
+    real=$(realpath -e -- "$st/objects") || return 1
+    top=$(realpath -e -- "$2") || return 1
+    [[ "$real/" == "$top/"* ]] || lfsext=1
+  fi
+  return 0
+}
+
+# refs/replace/*: a replaced commit is caught by UNPUSHED, but a replaced BLOB (or tree) holds content
+# no commit count can see, so any replace ref is a stop flag
+count_replace() {
+  local n
+  n=$(g "$1" for-each-ref --format=x refs/replace/ | wc -l) || return 1
+  repl=$((repl+n))
+}
+
+# fields are \x1f-separated and never empty (bash `read` would shift them otherwise)
+emit() { printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${1:--}" "${2:--}" "${3:--}" "${4:--}" "${5:--}" "${6:--}"; }
+
+scan_repo() {
+  local root=$1 n=$2 repo=$3
+  local url=- br sz=- err=0 dirty=0 unt=0 ign=0 unp=0 beh=0 st=0 wts=0 nsub=0 hid=0 lfs=0 lfsext=0 repl=0 fetchfail=0 rc
+  local ignpaths=() flags=() remotes backups r u wt line s p
+  remotes=$(g "$repo" remote) || err=1
+  backups=$(backup_remotes "$repo") || err=1
+  if [ -n "$remotes" ]; then
+    r=$(head -1 <<<"${backups:-$remotes}")
+    url=$(g "$repo" config --get "remote.$r.url" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##') || err=1
+  fi
+  if [ "$fetch" = 1 ] && [ -n "$backups" ]; then fetch_backups "$repo" "$backups" || fetchfail=1; fi
+  if br=$(g "$repo" symbolic-ref -q --short HEAD); then :; else
+    if [ $? -eq 1 ]; then br=DETACHED; flags+=(DETACHED); else br=?; err=1; fi
+  fi
+
+  count_status "$repo" || err=1
+  count_hidden "$repo" || err=1
+  count_lfs "$repo" "$repo" || err=1
+  count_replace "$repo" || err=1
+  if [ -n "$backups" ]; then
+    count_unpushed "$repo" "$backups"; rc=$?
+    [ "$rc" = 1 ] && err=1; [ "$rc" = 2 ] && fetchfail=1
+  fi
+  if g "$repo" rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
+    beh=$(g "$repo" rev-list --count 'HEAD..@{u}') || { beh=0; err=1; }
+  fi
+  s=$(g "$repo" stash list) || err=1; st=$(lines "$s")
+
+  # linked worktrees (first entry of the list is this checkout)
+  wt=$(g "$repo" worktree list --porcelain) || err=1
+  while IFS= read -r line; do
+    case "$line" in worktree\ *) p=${line#worktree }
+      [ "$p" = "$(realpath "$repo")" ] && continue
+      wts=$((wts+1)); [ -d "$p" ] && { count_status "$p" || err=1; count_hidden "$p" || err=1; } ;;
+    esac
+  done <<<"$wt"
+
+  # submodules, recursively: their own refs/stash/worktree aren't visible from the parent
+  s=$(g "$repo" submodule foreach --quiet --recursive 'echo "$toplevel/$sm_path"' 2>/dev/null) || err=1
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    nsub=$((nsub+1))
+    count_status "$p" || err=1
+    count_hidden "$p" || err=1
+    count_lfs "$p" "$repo" || err=1
+    count_replace "$p" || err=1
+    u=$(backup_remotes "$p") || err=1
+    if [ -z "$u" ]; then flags+=("SUBMODULE-NOBACKUP:${p#"$repo"/}")
+    else
+      if [ "$fetch" = 1 ]; then fetch_backups "$p" "$u" || fetchfail=1; fi
+      count_unpushed "$p" "$u"; rc=$?
+      [ "$rc" = 1 ] && err=1; [ "$rc" = 2 ] && fetchfail=1
+    fi
+    u=$(g "$p" stash list) || err=1; st=$((st+$(lines "$u")))
+  done <<<"$s"
+
+  if [ -z "$remotes" ]; then flags+=(NOREMOTE); elif [ -z "$backups" ]; then flags+=(LOCALREMOTE); fi
+  [ "$unp" -gt 0 ] && flags+=("UNPUSHED:$unp")
+  [ "$dirty" -gt 0 ] && flags+=("DIRTY:$dirty")
+  [ "$unt" -gt 0 ] && flags+=("UNTRACKED:$unt")
+  [ "$st" -gt 0 ] && flags+=("STASH:$st")
+  [ "$ign" -gt 0 ] && flags+=("IGNORED:$ign")
+  [ "$wts" -gt 0 ] && flags+=("WORKTREES:$wts")
+  [ "$nsub" -gt 0 ] && flags+=("SUBMODULES:$nsub")
+  [ "$hid" -gt 0 ] && flags+=("HIDDENIDX:$hid")
+  [ "$lfs" -gt 0 ] && flags+=("LFS:$lfs")
+  [ "$lfsext" = 1 ] && flags+=(LFS-EXTERNAL)
+  [ "$repl" -gt 0 ] && flags+=("REPLACE:$repl")
+  [ "$fetchfail" = 1 ] && flags+=(FETCHFAIL)
+  [ "$err" = 1 ] && flags+=(ERR)
+  [ "$beh" -gt 0 ] && flags+=("BEHIND:$beh")
+  if [ "$size" = 1 ]; then
+    sz=$(du -sh "$repo" 2>/dev/null | cut -f1)
+    [ ${#ignpaths[@]} -gt 0 ] && flags+=("ignored-size:$(du -sch "${ignpaths[@]}" 2>/dev/null | tail -1 | cut -f1)")
+  fi
+  emit "$root" "$n" "$br" "$url" "$sz" "${flags[*]}"
+}
+
+scan_entry() {   # $1 root as written, $2 display name, $3 abs path
+  local root=$1 n=$2 d=$3 top nested=() sz=- x
+  if [[ "$n" == *$'\t'* || "$n" == *$'\n'* || "$n" == *$'\x1f'* ]]; then n=$(printf '%q' "$n"); badname=" BADNAME"; else badname=""; fi
+  if [ ! -r "$d" ] || [ ! -x "$d" ]; then emit "$root" "$n" - - - "ERR NOACCESS$badname"; return; fi
+  top=$(git --no-optional-locks -C "$d" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$top" ] && [ "$top" = "$(realpath "$d")" ]; then scan_repo "$root" "$n" "$d"; return; fi
+  [ "$size" = 1 ] && sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+  if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then emit "$root" "$n" - - "$sz" "EMPTY$badname"; return; fi
+  # git repos nested inside a non-git dir (kirby/katam): list them and audit each one
+  # (find runs into a temp file so its exit status is visible: an unreadable subdir means "can't tell")
+  local nf ferr=""; nf=$(tmpf)
+  find "$d" -mindepth 2 -maxdepth 6 -name .git -print0 -prune >"$nf" 2>/dev/null || ferr=" ERR"
+  while IFS= read -r -d '' x; do nested+=("$(dirname "$x")"); done <"$nf"; rm -f "$nf"
+  if [ ${#nested[@]} -gt 0 ]; then
+    emit "$root" "$n" - - "$sz" "NOGIT NESTED:${#nested[@]}$ferr$badname"
+    for x in "${nested[@]}"; do scan_repo "$root" "$n/${x#"$d"/}" "$x"; done
+  else
+    emit "$root" "$n" - - "$sz" "NOGIT$ferr$badname"
+  fi
+}
+
+for root in "$@"; do
+  r="${root/#\~/$HOME}"; r="${r%/}"
+  if [ ! -e "$r" ]; then
+    # only a definite ENOENT is a missing root; EACCES on a parent dir means we can't tell
+    if absent "$r"; then
+      emit "$root" "(root)" - - - ROOT-MISSING
+    else
+      echo "#ROOTERR $root: can't tell whether it exists (permission denied on a parent, or a broken symlink)"
+    fi
+    continue
+  fi
+  # exists but can't be listed: with nullglob that would look like an empty root, so the host's
+  # audit is marked incomplete instead
+  if [ ! -d "$r" ] || [ ! -r "$r" ] || [ ! -x "$r" ]; then echo "#ROOTERR $root: not a readable directory"; continue; fi
+  loose=0
+  for e in "$r"/*; do
+    if [ -L "$e" ] || [ ! -d "$e" ]; then loose=$((loose+1)); continue; fi
+    scan_entry "$root" "$(basename "$e")" "$e"
+  done
+  [ "$loose" -gt 0 ] && emit "$root" "(loose files)" - - - "LOOSE:$loose"
+done
+echo '#DONE'
+EOF
+
+tmp=$(mktemp -d) || { echo "fleet-audit: mktemp -d failed" >&2; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
+tmo=600; [ "$fetch" = 1 ] && tmo=1800; tmo=${FLEET_AUDIT_TIMEOUT:-$tmo}   # per-host scan timeout (s)
+ran=()
+while IFS="$US" read -r id ssh roots; do
+  [ -z "$id" ] && continue
+  if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $id " ]]; then continue; fi
+  ran+=("$id")
+  (
+    # shellcheck disable=SC2086
+    if [ "$ssh" = local ]; then
+      timeout "$tmo" bash -c "$SCAN" scan "$fetch" "$size" $roots
+    else
+      # login shell may be fish -> always hand the script to bash explicitly; single-quote the
+      # roots so the remote shell doesn't expand `~` (the scanner does, and reports them as written)
+      qroots=$(for r in $roots; do printf "'%s' " "$r"; done)
+      timeout "$tmo" ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh" bash -s -- "$fetch" "$size" "$qroots" <<<"$SCAN"
+    fi > "$tmp/$id.tsv" 2> "$tmp/$id.err"
+    echo "$?" > "$tmp/$id.rc"
+  ) &
+done <<<"$hosts_tsv"
+wait
+
+failed=0
+printf '%-40s %-7s %-11s %-24s %-6s %s\n' DIR HOST ROOT BRANCH SIZE FLAGS
+for id in "${ran[@]}"; do
+  grep -v '^#' "$tmp/$id.tsv" | while IFS="$US" read -r root n br url sz fl; do
+    flags=($fl); [ "$fl" = - ] && flags=()
+    top=${n%%/*}
+    want=$(awk -F"$US" -v n="$top" '$1==n {print $2}' <<<"$proj_tsv")
+    if [[ "$n" == "(root)" || "$n" == "(loose files)" ]]; then :
+    elif [ -z "$want" ]; then flags+=(UNLISTED)
+    elif [ "$want" = "?" ]; then flags+=(UNDECIDED)
+    elif [ "$want" != "*" ] && [[ ! ",$want," == *",$id,"* ]]; then flags+=("MISPLACED(owner:$want)")
+    fi
+    [ "${root%/}" = "~/code" ] && flags+=(LEGACY)
+    [ ${#flags[@]} -eq 0 ] && [ "$show_all" = 0 ] && continue
+    printf '%-40s %-7s %-11s %-24s %-6s %s\n' "$n" "$id" "$root" "${br:0:24}" "$sz" "${flags[*]:-ok}"
+  done
+done | sort -k1,1 -k2,2
+
+echo
+for id in "${ran[@]}"; do
+  rc=$(cat "$tmp/$id.rc" 2>/dev/null || echo '?'); n=$(grep -vc '^#' "$tmp/$id.tsv")
+  rooterr=$(sed -n 's/^#ROOTERR //p' "$tmp/$id.tsv")
+  if [ "$rc" = 0 ] && [ "$(tail -1 "$tmp/$id.tsv")" = '#DONE' ] && [ -z "$rooterr" ]; then
+    echo "== $id: audited ($n entries)"
+    # warnings the scanner hit (the affected rows also carry ERR): never swallow them
+    if [ -s "$tmp/$id.err" ]; then
+      echo "   !! warnings from the $id scan (git warnings also put ERR on the repo concerned):"
+      head -5 "$tmp/$id.err" | sed 's/^/      /'
+    fi
+    # projects registered for this host but not found (only meaningful after a complete scan)
+    while IFS="$US" read -r p want; do
+      case "$want" in '?'|'') continue ;; '*') ;; *) [[ ",$want," == *",$id,"* ]] || continue ;; esac
+      awk -F"$US" -v p="$p" '$2==p {f=1} END {exit !f}' "$tmp/$id.tsv" || echo "   -- $p: registered for $id but not found there"
+    done <<<"$proj_tsv"
+  else
+    failed=1
+    why="exit $rc"; [ "$rc" = 124 ] && why="timed out after ${tmo}s"; [ "$rc" = 255 ] && why="ssh failed"
+    if [ -n "$rooterr" ]; then
+      echo "!! $id: INCOMPLETE, root(s) could not be listed: $(tr '\n' ';' <<<"$rooterr")"
+    elif [ "$n" -gt 0 ]; then
+      echo "!! $id: INCOMPLETE ($why) after $n entries. Entries not shown above were NOT checked, not clean"
+    else
+      echo "!! $id: NOT AUDITED ($why): $(tr '\n' ' ' < "$tmp/$id.err" | head -c 200)"
+    fi
+  fi
+done
+for sk in "${skipped[@]}"; do echo "-- skipped host $sk: not audited"; done
+[ "$fetch" = 0 ] && echo "note: no --fetch, so UNPUSHED/BEHIND use cached remote refs. Run with --fetch before deleting anything."
+exit "$failed"

@@ -19,8 +19,11 @@ later `ssh`/`rsync`/`scp` to that host reuses it — no re-auth, instant reconne
 
 ## The lab workstation — LKJ008-psy
 
-Tailscale host, **password auth**: the SSH key was removed so a second person can reach it via a
-Tailscale share (keys were causing trouble there), so no `ssh-copy-id` / keyless login. Alias:
+Tailscale host, **key + password auth**. The laptop's `id_ed25519` is in `~/.ssh/authorized_keys`
+again, so login needs no password (verified 2026-10-23). Password login is still enabled server-side
+on purpose, for `ssh-copy-id` and LAN bootstrap. (The key was briefly removed while the box was
+shared with a second person over Tailscale; that sharing has ended.) The box is in the fleet inventory,
+`fleet/hosts.yaml`. To add more lab machines, see `fleet/README.md`. Alias:
 
 ```sshconfig
 Host lab lkj008 lkj008-psy
@@ -29,8 +32,9 @@ Host lab lkj008 lkj008-psy
   # inherits ControlMaster/ControlPersist from Host *
 ```
 
-First `ssh lab` prompts for the password and opens the multiplexed master; after that,
-`ssh -o BatchMode=yes lab` (and rsync/scp, and agents) reuse the socket with no re-prompt.
+The key logs in with no prompt, and the first `ssh lab` also opens the multiplexed master that later
+`ssh -o BatchMode=yes lab` calls (and rsync/scp, and agents) reuse. Because it's key auth, BatchMode
+calls succeed even when that socket is down.
 
 Then it behaves exactly like a cluster alias:
 

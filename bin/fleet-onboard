@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# Join a CachyOS/Arch machine to the Tailscale fleet. Run it ON the new machine, at its keyboard.
+#
+#   fleet-onboard [new-hostname]              # interactive `tailscale up` (prints a login URL)
+#   fleet-onboard --authkey lkj009-psy        # prompts (hidden) for a pre-generated tskey-auth-… key
+#   fleet-onboard --force …                   # allow running over SSH (see below)
+#
+# Idempotent; rerunning skips whatever is already done. Self-elevates with sudo (one prompt). It:
+#   1. sets the hostname (that becomes the Tailscale device name), if you pass one
+#   2. full system upgrade + installs git, rsync, tmux, fish, openssh, tailscale, bind (for `dig`)
+#      (`pacman -Syu`: a bare -S against a stale sync DB 404s or half-upgrades openssh); enables sshd
+#      and tailscaled. If the upgrade replaced the kernel so tun can't load, it says: reboot, rerun.
+#   3. installs the SSH login menu (plain fish / tmux / herdr, plain after 5s) into the user's
+#      ~/.config/fish/conf.d/, if their login shell is fish
+#   4. applies the CachyOS MagicDNS fix: /etc/resolv.conf -> systemd-resolved stub, so that
+#      NetworkManager stops overwriting it (https://tailscale.com/s/resolved-nm). Guarded: it only
+#      switches if DNS works before, the stub listener answers and the backup succeeded; afterwards it
+#      checks DNS through /etc/resolv.conf itself (dig) and puts the old file back (exit 1) if it broke.
+#   5. runs `tailscale up` unless the node is already logged in. An auth key never reaches argv or
+#      shell history: it's read hidden from the tty into a 0600 temp file, passed as --auth-key=file:…
+#   6. prints what to paste on the laptop (ssh alias, ssh-copy-id, hosts.yaml entry)
+#
+# Over SSH (SSH_CONNECTION, or an sshd/tailscaled parent process) it refuses without --force: steps
+# 4–5 restart NetworkManager and tailscaled, which can cut the session and leave it half-done.
+#
+# It does NOT touch sshd auth settings: password login stays on, and key login works once
+# ssh-copy-id has run. (For key-only there's bin/harden-sshd-keyonly, but that's optional.)
+# See fleet/README.md for the full procedure.
+set -euo pipefail
+
+case " $* " in *" -h "*|*" --help "*) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;; esac
+
+authkey=0; force=0; newname=""
+for a in "$@"; do
+  case "$a" in
+    --authkey) authkey=1 ;;
+    --force) force=1 ;;
+    -*) echo "unknown flag $a" >&2; exit 2 ;;
+    *) newname="$a" ;;
+  esac
+done
+
+# Over SSH? Checked BEFORE the sudo re-exec (sudo's env_reset drops SSH_CONNECTION) and again after
+# it via the process tree, which sudo can't hide: any sshd / tailscaled (Tailscale SSH) ancestor.
+under_ssh() {
+  [ -n "${SSH_CONNECTION:-}" ] && return 0
+  local pid=$$ comm
+  while [ "${pid:-0}" -gt 1 ]; do
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+    case "$comm" in sshd|sshd-session|sshd-auth|tailscaled) return 0 ;; esac
+    pid=$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f2) || return 1
+  done
+  return 1
+}
+if [ "$force" = 0 ] && under_ssh; then
+  echo "Refusing over SSH: the DNS and tailscale steps restart NetworkManager/tailscaled and can drop this" >&2
+  echo "session partway. Run it at the machine's keyboard, or pass --force if you accept that." >&2
+  exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  # via bash + absolute path, so it still works when started as `bash fleet-onboard` / without +x
+  exec sudo -- bash "$(readlink -f "$0")" "$@"
+fi
+
+user="${SUDO_USER:-}"
+if [ -z "$user" ] || [ "$user" = root ]; then
+  echo "Run this as your normal user (it sudo's itself), not from a root login: it needs to know whose" >&2
+  echo "home gets the ssh menu and which user goes in the ssh alias." >&2
+  exit 1
+fi
+step() { printf '\n== %s\n' "$*"; }
+# DNS checks. getent goes through nss-resolve, which talks to systemd-resolved directly and never
+# reads /etc/resolv.conf, so on its own it can't tell whether the resolv.conf switch works. dig
+# (package `bind`) does read /etc/resolv.conf, and `dig @127.0.0.53` tests the stub listener itself.
+dig_ok() { dig +time=2 +tries=2 "$@" archlinux.org 2>/dev/null | grep -q 'status: NOERROR'; }
+dns_ok() { getent hosts archlinux.org >/dev/null 2>&1 && dig_ok; }
+wait_dns() { local i; for i in $(seq 1 15); do dns_ok && return 0; sleep 1; done; return 1; }
+
+keyfile=""
+trap '[ -z "$keyfile" ] || rm -f "$keyfile"' EXIT
+
+# 1. hostname
+if [ -n "$newname" ] && [ "$(hostnamectl --static)" != "$newname" ]; then
+  step "hostname: $(hostnamectl --static) -> $newname"
+  hostnamectl set-hostname "$newname"
+fi
+host="$(hostnamectl --static)"
+
+# 2. packages + services
+# tailscaled needs the tun module (CONFIG_TUN=m on linux-cachyos). Load it BEFORE the upgrade:
+# if -Syu installs a new kernel, the running kernel's modules are gone and tun can't load until reboot.
+modprobe tun 2>/dev/null || true
+step "pacman -Syu + tailscale openssh git rsync tmux fish bind (bind = dig, for the DNS checks)"
+pacman -Syu --needed --noconfirm tailscale openssh git rsync tmux fish bind
+step "enable sshd + tailscaled"
+systemctl enable --now sshd
+systemctl enable tailscaled
+# loaded module, or TUN built into the kernel (no /sys/module entry then)
+tun_ok() { [ -d /sys/module/tun ] || zgrep -qx 'CONFIG_TUN=y' /proc/config.gz 2>/dev/null; }
+if ! tun_ok; then
+  echo "!! The kernel was upgraded and the tun module can't be loaded until you reboot." >&2
+  echo "   Reboot, then rerun fleet-onboard (sshd and tailscaled will start at boot)." >&2
+  exit 1
+fi
+systemctl start tailscaled
+
+# Ask for the auth key now (hidden, never in argv/history): after the upgrade and the tun check, so a
+# "reboot, then rerun" stop doesn't throw away a key you just typed. The rest runs unattended.
+if [ "$authkey" = 1 ]; then
+  keyfile="$(mktemp)"; chmod 600 "$keyfile"
+  read -rsp "Tailscale auth key (input hidden): " key </dev/tty; echo
+  case "$key" in tskey-*) ;; *) echo "that doesn't look like a tskey-… auth key" >&2; exit 1 ;; esac
+  printf '%s' "$key" > "$keyfile"; unset key
+fi
+
+
+# 3. SSH login menu. Source of truth: linux-config home/dot_config/fish/conf.d/ssh-session-menu.fish
+# (private repo, so a fresh box can't fetch it). Embedded copy; if you change the menu there, re-paste it here.
+read -r -d '' MENU <<'MENU_EOF' || true
+# Interactive SSH login session menu: tmux / herdr / plain fish.
+# Captured from LKJ008-psy into shared config so any SSH'd-into machine offers it.
+# Guarded so it only fires on an INTERACTIVE SSH login and never in automation:
+# skipped when non-interactive (scp/rsync/scripted ssh), already inside tmux or
+# herdr, not an SSH login, or NO_TMUX is set (escape hatch for agents/scripts).
+if status is-interactive; and not set -q TMUX; and not set -q HERDR_ENV; and set -q SSH_CONNECTION; and not set -q NO_TMUX
+    echo "Session:  1) none (plain fish)   2) tmux   3) herdr"
+    echo -n "Choice [defaults to 1) plain fish in 5s]: "
+    # fish's `read` has no timeout, so borrow bash for a 5s single-key read.
+    set -l choice (bash -c 'read -t 5 -n 1 c; printf "%s" "$c"')
+    echo
+    switch "$choice"
+        case 2
+            if type -q tmux
+                tmux attach -t main; or tmux new -s main
+            else
+                echo "tmux not installed."
+            end
+        case 3
+            if type -q herdr
+                herdr
+            else
+                echo "herdr not installed."
+            end
+        case '*'
+            # 1 / none / Enter / timeout -> stay in plain fish
+    end
+end
+MENU_EOF
+home="$(getent passwd "$user" | cut -d: -f6)"
+login_shell="$(getent passwd "$user" | cut -d: -f7)"
+dest="$home/.config/fish/conf.d/ssh-session-menu.fish"
+as_user() { sudo -u "$user" -- "$@"; }   # writes happen as the user: right owner, user's umask
+if [ "$(basename "$login_shell")" != fish ]; then
+  step "ssh menu: skipped, $user's login shell is $login_shell, not fish (chsh -s /usr/bin/fish $user, then rerun)"
+elif [ -L "$dest" ] || [ "$(realpath -m "$(dirname "$dest")")" != "$(realpath -m "$home")/.config/fish/conf.d" ]; then
+  # the file or a parent dir (~/.config, fish, conf.d) is a symlink, e.g. into a dotfiles repo
+  step "ssh menu: $dest or a parent dir is a symlink (stow/chezmoi?), leaving it alone"
+elif [ -f "$dest" ] && [ "$(cat "$dest")" = "$MENU" ]; then
+  step "ssh menu: already installed at $dest"
+else
+  step "ssh menu -> $dest"
+  # mkdir -p only creates what's missing and never re-modes an existing (e.g. 0700) ~/.config
+  as_user mkdir -p "$(dirname "$dest")"
+  [ -f "$dest" ] && as_user cp -a "$dest" "$dest.bak-$(date +%F)"
+  printf '%s\n' "$MENU" | as_user tee "$dest" >/dev/null
+  chmod 644 "$dest"
+fi
+
+# 4. MagicDNS: resolved + NetworkManager wiring
+stub=/run/systemd/resolve/stub-resolv.conf
+switched=0
+restart_dns() {
+  systemctl restart systemd-resolved || return 1
+  if systemctl is-active -q NetworkManager; then systemctl restart NetworkManager || return 1; fi
+}
+if ! systemctl is-active -q systemd-resolved; then
+  step "systemd-resolved not running: skipped the MagicDNS fix (check 'tailscale status' for a DNS warning)"
+elif [ "$(readlink -f /etc/resolv.conf)" = "$stub" ]; then   # -f: also matches ../run/… relative links
+  if wait_dns; then
+    step "resolv.conf already points at the resolved stub, DNS works"
+  else
+    step "resolv.conf already points at the resolved stub, but DNS is NOT working"
+    ls -1 /etc/resolv.conf.bak-* 2>/dev/null | sed 's/^/  backup from an earlier run: /' || true
+    echo "  to undo: sudo cp -a <backup> /etc/resolv.conf && sudo systemctl restart systemd-resolved NetworkManager" >&2
+    exit 1
+  fi
+else
+  # Preconditions. Each failure leaves resolv.conf untouched.
+  if ! dns_ok; then
+    echo "DNS doesn't work even before the change; not touching resolv.conf. Fix networking first." >&2; exit 1
+  fi
+  if [ ! -e "$stub" ] || ! dig_ok @127.0.0.53; then
+    echo "resolved's stub listener (127.0.0.53) isn't answering (DNSStubListener=no?): switching would break" >&2
+    echo "DNS, so resolv.conf was left alone. MagicDNS may not work; check 'resolvectl status'." >&2
+  else
+    backup="/etc/resolv.conf.bak-$(date +%F-%H%M%S)"
+    cp -a /etc/resolv.conf "$backup"   # set -e: no backup, no change
+    step "resolv.conf -> $stub (backup: $backup)"
+    systemctl enable systemd-resolved   # still there after a reboot
+    ln -sf "$stub" /etc/resolv.conf
+    if restart_dns && wait_dns; then
+      echo "  DNS still works"; switched=1
+    else
+      echo "!! DNS broke after the switch: restoring $backup" >&2
+      rm -f /etc/resolv.conf; cp -a "$backup" /etc/resolv.conf
+      restart_dns || true
+      wait_dns && echo "  restored; DNS works again" >&2 || echo "  restored, but DNS still failing: check networking" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# 5. join the tailnet. Decide on BackendState (not the exit code): right after a tailscaled restart
+# `tailscale status` can fail briefly on a node that is already logged in.
+# (tailscaled is restarted only if resolv.conf just changed, so it re-detects the DNS manager.)
+[ "$switched" = 0 ] || systemctl restart tailscaled
+state=""
+for _ in $(seq 1 20); do
+  # `|| true`: a failing status call (tailscaled still starting) must mean "retry", not abort under set -e
+  state="$(tailscale status --json 2>/dev/null | sed -n 's/.*"BackendState": *"\([A-Za-z]*\)".*/\1/p' | head -1 || true)"
+  case "$state" in Running|NeedsLogin|NeedsMachineAuth|Stopped) break ;; esac
+  sleep 1
+done
+if [ -z "$state" ]; then
+  echo "!! tailscaled isn't answering after 20s. Check 'systemctl status tailscaled' and 'journalctl -u tailscaled'," >&2
+  echo "   fix it, then rerun fleet-onboard." >&2
+  exit 1
+fi
+case "$state" in
+  Running) step "tailscale: already logged in" ;;
+  NeedsMachineAuth) step "tailscale: logged in, waiting for admin approval in the console" ;;
+  Stopped) step "tailscale: logged in but down -> tailscale up"; tailscale up ;;
+  *)
+    step "tailscale up (state: ${state:-unknown})"
+    if [ -n "$keyfile" ]; then
+      tailscale up --auth-key="file:$keyfile"
+    else
+      tailscale up   # prints a URL; open it on any device logged into the tailnet account
+    fi ;;
+esac
+[ -z "$keyfile" ] || rm -f "$keyfile"
+ip4="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+ip4="${ip4:-<no IP yet: approve $host in the admin console, then run 'tailscale ip -4'>}"
+
+# 6. hand-off
+echo
+tailscale status 2>&1 | grep -i -A2 'health\|warning' || echo "tailscale health: no warnings"
+cat <<MSG
+
+==============================================================================
+ $host joined the tailnet as $ip4 (ssh user: $user)
+==============================================================================
+In the Tailscale admin console (https://login.tailscale.com/admin/machines):
+  - $host -> "..." -> Disable key expiry. Otherwise it drops off the tailnet in ~180 days.
+
+On the LAPTOP:
+  1. ~/.ssh/config:
+       Host <alias> $host
+         HostName $ip4
+         User $user
+  2. ssh-copy-id <alias>            # password once, keys from then on
+     ssh -o BatchMode=yes <alias> hostname   # confirm it logs in without asking
+  3. add it to cluster-utilities/fleet/hosts.yaml (status: active), then run fleet-audit
+     and check for '== <id>: audited'
+
+Then reboot this machine once and check from the laptop that 'ssh <alias>' and MagicDNS
+('ssh $host') still work, before onboarding the next one.
+
+Optional, on this machine: clone cluster-utilities + agent-utilities into ~/Projects.
+MSG

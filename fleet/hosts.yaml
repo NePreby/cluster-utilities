@@ -1,0 +1,42 @@
+# Every machine I run work on, keyed by a short id that fleet/projects.yaml and bin/fleet-audit use.
+#
+# Keep to this flat shape (2-space host id, 4-space `key: value`): bin/fleet-audit reads it with
+# awk, since none of the hosts ship a YAML parser. Alliance clusters are NOT here — they're
+# reached via ~/.ssh/config + cluster-login (see AGENT.md); this is the Tailscale fleet.
+#
+#   ssh:        the ~/.ssh/config alias, or `local` for the machine you're sitting at
+#   tailscale:  device name on the tailnet (tail2e782e.ts.net) = the OS hostname
+#   auth:       how ssh logs in — `key` / `key+password` (password still enabled server-side)
+#   roots:      dirs that hold repos on this host, space-separated (audited by fleet-audit)
+#   status:     active | planned | retired
+
+hosts:
+  laptop:
+    ssh: local
+    tailscale: zephyrus-m16
+    ip: 100.80.226.124
+    role: desktop/dev — interactive work, configs, personal docs; not long research runs
+    spec: ASUS ROG Zephyrus M16, CachyOS
+    auth: n/a
+    roots: ~/Projects ~/code
+    status: active
+  lab:
+    ssh: lab
+    tailscale: lkj008-psy
+    ip: 100.86.65.72
+    role: research — default home for research repos + their data
+    spec: Xeon E3-1240 v5 (8 cores), 31 GB RAM, Quadro K620, 440 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects ~/code
+    status: active
+  # The other lab workstations (similar spec, CachyOS installed) — fill in once onboarded with
+  # bin/fleet-onboard, then flip status to active. See fleet/README.md.
+  # lab2:
+  #   ssh: lab2
+  #   tailscale: lkj0XX-psy
+  #   ip: 100.x.y.z
+  #   role: research
+  #   spec:
+  #   auth: key+password
+  #   roots: ~/Projects
+  #   status: planned
