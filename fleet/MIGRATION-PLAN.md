@@ -40,8 +40,8 @@ Nothing has been moved or deleted yet. The tooling (fleet-audit, projects.yaml) 
 - DONE 2026-10-24 for `epilepsy`: rawdata, derivatives, old_thesis_derivatives (`~/datasets/epilepsy/`) and the repo's
   ignored/untracked outputs are on lab8, verified by sha256 / `rsync -c` (0 differences), and deleted from the laptop.
   The paths are in the epilepsy README ("Where the data lives"). `deprecated-epilepsy`: its out-of-git data (62 G) was copied into lab8
-  `~/Projects/epilepsy/_legacy-data_deprecated-epilepsy_df4535d/` and verified on 2026-10-24. No second checkout is kept; drop the
-  laptop checkout once it is deleted.
+  `~/Projects/epilepsy/_legacy-data_deprecated-epilepsy_df4535d/` and verified on 2026-10-24. No second checkout is kept: the laptop
+  checkout was deleted 2026-10-24 and removed from projects.yaml.
 - `deprecated-epilepsy` holds 67 GB of ignored data, plus the laptop's prereg caches and fifs. Move them to the lab
   with the README's staged rsync and `rsync -anci` verification. Then set `epilepsy` and `deprecated-epilepsy` to
   `[lab]` in projects.yaml.

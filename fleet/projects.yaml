@@ -29,7 +29,6 @@ projects:
 
   # --- lab: research ---
   epilepsy: [lab8]                   # data on lab8 since 2026-10-24, checksum-verified (paths: epilepsy README); laptop checkout is code-only
-  deprecated-epilepsy: [laptop]      # TEMP: 67 GB of ignored data/derivatives to migrate to lab8, then delete
   speech-representations: [lab8]
   containerized-red-teaming: [lab8]
   crt-pr130: [lab8]
