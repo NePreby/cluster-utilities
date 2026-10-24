@@ -1,10 +1,11 @@
-# REVIEW_REQUEST: round 8 (final pass), review of `fleet` commit ba2077b in cluster-utilities
+# REVIEW_REQUEST: round 8 (final pass), review of `fleet` commit 55cd5d1 in cluster-utilities
 
 **Task: adversarial CODE REVIEW, narrowly scoped.** Round 7 cleared the scanner code (no false `ok`) and
 found three problems in the README's archive/copy procedure. The author says they're fixed. Review ONLY:
 1. the README's "Before deleting a copy" LFS / LFS-EXTERNAL bullets,
 2. the README's archive + copy recipe (the bash block under "If any of that matters for a repo"),
-3. the two changed scanner lines in `count_lfs` (`find -L … -maxdepth 4` and its comment).
+3. the changed object count in `count_lfs`: a plain `find -H <store>/objects -type f` at any depth,
+   no link following, with any symlink below objects/ handled by the existing LFS-EXTERNAL check.
 Try to BREAK each fix with concrete inputs, and look for bugs these changes introduced. Do not re-review
 anything else. Do not propose new features. **If both reviewers report no Blocking findings, the branch is
 merged into main.** The owner has decided in advance: if the copy step has another blocking hole, it gets
@@ -27,25 +28,26 @@ isn't one, is the worst bug class.
   `mkdir` (fails if it exists), then `rsync "$d/" host:archives/$b/`, then the remote file's sha256 is
   compared with the local hash. Tested by the author against a real fish remote: a fresh name gives COPY
   OK; an existing name is refused and the old archive left untouched; no local hash is refused.
-- Scanner: `find -L` capped at `-maxdepth 4` (layout `aa/bb/<oid>`); the comment now says a dangling link
-  is caught as LFS-EXTERNAL.
+- Scanner: the LFS object count no longer follows links (round 7 had `find -L`; an interim `-maxdepth 4`
+  was dropped because it could miss deeper regular files). Any symlink below objects/, dangling or
+  looping included, sets LFS-EXTERNAL.
 
 ## Deliverable
-Write `reviews/ba2077b/review_<model-slug>.md` containing:
+Write `reviews/55cd5d1/review_<model-slug>.md` containing:
 - A table: G1/G2/G3/scanner → FIXED / PARTIAL / BROKEN, with the input you tried.
 - `## Blocking` and `## Non-blocking` sections (each ranked most severe first). Blocking = data loss or a
   false "verified backup" / false clean when the README is followed literally. Say why each
   non-blocking item doesn't block. Each finding gives the file:line, a CONCRETE trigger, and a fix.
-- Does the `-maxdepth 4` cap create any false clean (e.g. objects deeper than 4 levels counted as 0 with
-  no other flag)?
+- Can the new count produce a false clean (a store whose content is neither counted as LFS:n nor
+  flagged LFS-EXTERNAL / ERR)?
 - Bottom line: ready to merge into main? Is the copy step a sound design, or should it be replaced?
 
 Your value is INDEPENDENT judgment: do not read anything else under reviews/.
 
-## Diff since round 7 (e5acf77..ba2077b)
+## Diff since round 7 (e5acf77..55cd5d1)
 ```diff
 diff --git a/bin/fleet-audit b/bin/fleet-audit
-index c5123ff..7b2e4d0 100755
+index c5123ff..f9036bd 100755
 --- a/bin/fleet-audit
 +++ b/bin/fleet-audit
 @@ -300,9 +300,11 @@ count_lfs() {
@@ -55,11 +57,11 @@ index c5123ff..7b2e4d0 100755
 -  # -L: count what git-lfs can actually read, through symlinked shard dirs or objects too. A dangling
 -  # or looping link makes find fail -> ERR.
 -  find -L "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
-+  # -L: count what git-lfs can actually read, through symlinked shard dirs or objects too. A looping link
-+  # makes find fail -> ERR; a dangling one isn't counted but is caught by the symlink check below
-+  # (LFS-EXTERNAL). -maxdepth 4: the layout is aa/bb/<oid>, so a link out of the store can't send the
-+  # count wandering through some huge tree.
-+  find -L "$st/objects" -maxdepth 4 -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
++  # Count the regular files physically in the store, at any depth. Links are NOT followed: any symlink
++  # below objects/ (a shard or object moved elsewhere, dangling or looping) is caught by the check below
++  # and makes the row LFS-EXTERNAL, a stop flag, so content behind links is never needed in the count.
++  # -H only follows objects itself if it's a link (its target is checked by the containment test).
++  find -H "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
    n=$(wc -c <"$tf"); rm -f "$tf"
    [ "$frc" = 0 ] || return 1
    # any symlink INSIDE the store (a shard dir or object moved to another disk): tar archives the link,
