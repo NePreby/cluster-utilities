@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Where is every repo, and is anything in it not saved anywhere else?
+#
+# Scans each repo root (e.g. ~/Projects, ~/code) on every ACTIVE host in fleet/hosts.yaml, over
+# `ssh -o BatchMode=yes` (or locally for `ssh: local`), and checks each dir against
+# fleet/projects.yaml. Read-only, except that --fetch runs `git fetch`. One row per (dir, host) that
+# has something to act on:
+#
+#   NOGIT        not a git repo (only copy, unless you've backed it up)
+#   NOREMOTE     git repo with no remote (commits exist only here)
+#   UNPUSHED:n   commits on local branches not on any remote. May count branches that were
+#                squash-merged and whose commits are gone from the remote; check before worrying
+#   DIRTY:n      modified tracked files      UNTRACKED:n  untracked (not ignored) files
+#   STASH:n      stash entries               BEHIND:n     behind upstream (needs --fetch to be current)
+#   UNLISTED / MISPLACED / UNDECIDED         placement vs fleet/projects.yaml
+#   LEGACY       lives in ~/code (being migrated to ~/Projects)
+#
+#   fleet-audit                 # problems only, all active hosts
+#   fleet-audit --all           # every dir, including clean + correctly placed ones
+#   fleet-audit --fetch         # git fetch first so BEHIND is current (slower, touches network)
+#   fleet-audit --size          # add du sizes (slow on big data dirs)
+#   fleet-audit lab             # only these host ids
+set -uo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+HOSTS="$here/fleet/hosts.yaml"
+PROJECTS="$here/fleet/projects.yaml"
+
+show_all=0; fetch=0; size=0; only=()
+for a in "$@"; do
+  case "$a" in
+    --all) show_all=1 ;; --fetch) fetch=1 ;; --size) size=1 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown flag $a" >&2; exit 2 ;;
+    *) only+=("$a") ;;
+  esac
+done
+
+# --- parse hosts.yaml -> "id<TAB>ssh<TAB>roots" for active hosts ---
+hosts_tsv=$(awk '
+  /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+  /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { if (id && st=="active") print id "\t" ssh "\t" roots
+                                       id=$1; sub(":","",id); ssh=""; roots=""; st=""; next }
+  /^    ssh:/    { sub(/^    ssh:[[:space:]]*/,"");    sub(/[[:space:]]+#.*/,""); ssh=$0 }
+  /^    roots:/  { sub(/^    roots:[[:space:]]*/,"");  sub(/[[:space:]]+#.*/,""); roots=$0 }
+  /^    status:/ { sub(/^    status:[[:space:]]*/,""); sub(/[[:space:]]+#.*/,""); st=$0 }
+  END { if (id && st=="active") print id "\t" ssh "\t" roots }' "$HOSTS")
+
+# --- parse projects.yaml -> "name<TAB>host,host" ---
+proj_tsv=$(awk '
+  /^  [^ #][^:]*:[[:space:]]*\[/ {
+    line=$0; sub(/[[:space:]]+#.*/,"",line)
+    name=line; sub(/^  /,"",name); sub(/:.*/,"",name)
+    hs=line; sub(/^[^\[]*\[/,"",hs); sub(/\].*/,"",hs); gsub(/[[:space:]]/,"",hs)
+    print name "\t" hs }' "$PROJECTS")
+
+# --- the per-host scanner (runs under bash on each host; args: fetch size root...) ---
+read -r -d '' SCAN <<'EOF'
+fetch=$1; size=$2; shift 2
+for root in "$@"; do
+  r="${root/#\~/$HOME}"; [ -d "$r" ] || continue
+  for d in "$r"/*/; do
+    d=${d%/}; n=$(basename "$d"); sz=-
+    [ "$size" = 1 ] && sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)
+    if [ "$top" != "$(realpath "$d")" ]; then
+      printf '%s\t%s\tnogit\t-\t-\t0\t0\t0\t0\t0\t%s\n' "$root" "$n" "$sz"; continue
+    fi
+    rem=$(git -C "$d" remote | head -1)
+    url=-; [ -n "$rem" ] && url=$(git -C "$d" remote get-url "$rem" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
+    [ "$fetch" = 1 ] && [ -n "$rem" ] && GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$d" fetch --all -q 2>/dev/null
+    br=$(git -C "$d" branch --show-current); br=${br:-DETACHED}
+    dirty=$(git -C "$d" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
+    unt=$(git -C "$d" status --porcelain 2>/dev/null | grep -c '^??')
+    unp=0; [ -n "$rem" ] && unp=$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l)
+    beh=$(git -C "$d" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)
+    st=$(git -C "$d" stash list 2>/dev/null | wc -l)
+    printf '%s\t%s\tgit\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$root" "$n" "$url" "$br" "$dirty" "$unt" "$unp" "$beh" "$st" "$sz"
+  done
+done
+EOF
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+while IFS=$'\t' read -r id ssh roots; do
+  [ -z "$id" ] && continue
+  if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $id " ]]; then continue; fi
+  (
+    # shellcheck disable=SC2086
+    if [ "$ssh" = local ]; then
+      bash -c "$SCAN" scan "$fetch" "$size" $roots
+    else
+      # login shell may be fish -> always hand the script to bash explicitly; single-quote the
+      # roots so the remote shell doesn't expand `~` (the scanner does, and reports them as written)
+      qroots=$(for r in $roots; do printf "'%s' " "$r"; done)
+      timeout 600 ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh" bash -s -- "$fetch" "$size" "$qroots" <<<"$SCAN"
+    fi > "$tmp/$id.tsv" 2> "$tmp/$id.err" || echo "$?" > "$tmp/$id.fail"
+  ) &
+done <<<"$hosts_tsv"
+wait
+
+printf '%-38s %-7s %-10s %-24s %-6s %s\n' DIR HOST ROOT BRANCH SIZE FLAGS
+for f in "$tmp"/*.tsv; do
+  [ -e "$f" ] || continue
+  id=$(basename "$f" .tsv)
+  if [ -e "$tmp/$id.fail" ]; then
+    echo "!! $id: scan failed (exit $(cat "$tmp/$id.fail")) — unreachable or auth problem: $(head -c 200 "$tmp/$id.err")" >&2
+  fi
+  while IFS=$'\t' read -r root n kind url br dirty unt unp beh st sz; do
+    flags=()
+    [ "$kind" = nogit ] && flags+=(NOGIT)
+    [ "$kind" = git ] && [ "$url" = - ] && flags+=(NOREMOTE)
+    [ "$unp" -gt 0 ] && flags+=("UNPUSHED:$unp")
+    [ "$dirty" -gt 0 ] && flags+=("DIRTY:$dirty")
+    [ "$unt" -gt 0 ] && flags+=("UNTRACKED:$unt")
+    [ "$st" -gt 0 ] && flags+=("STASH:$st")
+    [ "$beh" -gt 0 ] && flags+=("BEHIND:$beh")
+    want=$(awk -F'\t' -v n="$n" '$1==n {print $2}' <<<"$proj_tsv")
+    if [ -z "$want" ]; then flags+=(UNLISTED)
+    elif [ "$want" = "?" ]; then flags+=(UNDECIDED)
+    elif [[ ! ",$want," == *",$id,"* ]]; then flags+=("MISPLACED(owner:$want)")
+    fi
+    [ "$root" = "~/code" ] && flags+=(LEGACY)
+    [ ${#flags[@]} -eq 0 ] && [ "$show_all" = 0 ] && continue
+    printf '%-38s %-7s %-10s %-24s %-6s %s\n' "${n:0:38}" "$id" "$root" "${br:0:24}" "$sz" "${flags[*]:-ok}"
+  done < "$f"
+done | sort -k1,1 -k2,2
+
+# projects registered for a host but not found there
+while IFS=$'\t' read -r n want; do
+  [ "$want" = "?" ] && continue
+  IFS=, read -ra hs <<<"$want"
+  for h in "${hs[@]}"; do
+    [ -e "$tmp/$h.tsv" ] || continue
+    awk -F'\t' -v n="$n" '$2==n {f=1} END {exit !f}' "$tmp/$h.tsv" || echo "-- $n: registered for $h but not found there"
+  done
+done <<<"$proj_tsv"

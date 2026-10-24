@@ -1,0 +1,61 @@
+# Which host owns each project — the "one repo, one machine" rule, written down.
+#
+#   <dir name>: [<host id>, ...]     host ids come from fleet/hosts.yaml
+#
+# A project lives on exactly ONE host unless it's infra that every machine needs (the `both` set
+# below lists more than one host on purpose). `[?]` = not decided yet. bin/fleet-audit flags:
+#   UNLISTED  — a dir on some host that isn't in this file
+#   MISPLACED — a dir on a host that isn't in its list (stale copy, or the list is wrong)
+#   UNDECIDED — listed as [?]
+# Keys are directory basenames (repos are matched by dir name, not remote — e.g. the laptop's
+# deprecated-epilepsy is a separate checkout of the same remote as epilepsy).
+#
+# Keep to one `name: [a, b]` per line — fleet-audit reads this with awk.
+# Default for new research work: lab.
+
+projects:
+  # --- infra: on every host ---
+  cluster-utilities: [laptop, lab]
+  agent-utilities: [laptop, lab]
+  system-utilities: [laptop, lab]
+
+  # --- laptop: desktop, personal, needs a display/GPU ---
+  linux-config: [laptop]
+  kirby: [laptop]
+  genome-pgs: [laptop]
+  study-permit: [laptop]
+  os-debugs: [laptop, lab]
+
+  # --- lab: research ---
+  epilepsy: [lab, laptop]            # TEMP: laptop still holds fifs + untracked prereg caches; drop laptop after the data copy
+  deprecated-epilepsy: [laptop]      # TEMP: 67 GB of ignored data/derivatives to migrate to lab, then delete
+  speech-representations: [lab]
+  containerized-red-teaming: [lab]
+  crt-pr130: [lab]
+  gemini-agy-investigation-P88aiW: [lab]
+  gemini-agy-pr: [lab]
+  aaai-overclaiming-paper: [lab]
+  aaai-overclaiming-paper-arxiv: [lab]
+  overclaiming-paper-arxiv: [lab]
+  overclaiming-paper-iclr: [lab]
+  overclaiming-iclr-todo-snapshot-sXSfhz: [lab]
+  clean-neurons: [lab]
+  questionnaire-bias: [lab]
+  pkb: [lab]
+  pkb_incoming: [lab]
+  shareables: [lab]
+  handoffs: [lab]
+  amica-stuff: [lab]
+  speech-representations-lineage-report: [lab]
+  interp: [lab]
+  gbfb-port: [lab]
+  complex-seizures: [lab]
+  llm-therapy: [lab]
+
+  # --- undecided: on both hosts today, on different branches/commits ---
+  neurodags: [?]
+  neurodags-private: [?]
+  cocofeats: [?]
+  coco-pipe: [?]
+  galleria: [?]
+  yjmantilla.github.io: [?]

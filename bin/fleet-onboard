@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Join a CachyOS/Arch machine to the Tailscale fleet. Run it ON the new machine, at its keyboard.
+#
+#   fleet-onboard [new-hostname]                     # interactive `tailscale up` (prints a login URL)
+#   TS_AUTHKEY=tskey-auth-… fleet-onboard lkj009-psy # pre-generated key: no browser needed
+#
+# Idempotent; rerunning skips whatever is already done. Self-elevates with sudo (one prompt). It:
+#   1. sets the hostname (that becomes the Tailscale device name), if you pass one
+#   2. installs + enables sshd and tailscaled (plus git, rsync, tmux)
+#   3. applies the CachyOS MagicDNS fix: /etc/resolv.conf -> systemd-resolved stub, so that
+#      NetworkManager stops overwriting it (https://tailscale.com/s/resolved-nm)
+#   4. runs `tailscale up` unless the machine is already logged in
+#   5. prints what to paste on the laptop (ssh alias, ssh-copy-id, hosts.yaml entry)
+#
+# It does NOT touch sshd auth settings: password login stays on, and key login works once
+# ssh-copy-id has run. (For key-only there's bin/harden-sshd-keyonly, but that's optional.)
+# See fleet/README.md for the full procedure.
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo --preserve-env=TS_AUTHKEY -- "$0" "$@"
+fi
+user="${SUDO_USER:-$(logname 2>/dev/null || echo "$USER")}"
+step() { printf '\n== %s\n' "$*"; }
+
+# 1. hostname
+if [ $# -ge 1 ] && [ "$(hostnamectl --static)" != "$1" ]; then
+  step "hostname: $(hostnamectl --static) -> $1"
+  hostnamectl set-hostname "$1"
+fi
+host="$(hostnamectl --static)"
+
+# 2. packages + services
+step "packages: tailscale openssh git rsync tmux"
+pacman -S --needed --noconfirm tailscale openssh git rsync tmux
+step "enable sshd + tailscaled"
+systemctl enable --now sshd tailscaled
+
+# 3. MagicDNS: resolved + NetworkManager wiring
+stub=/run/systemd/resolve/stub-resolv.conf
+if systemctl is-active -q systemd-resolved; then
+  if [ "$(readlink /etc/resolv.conf)" != "$stub" ]; then
+    step "resolv.conf -> $stub (was: $(readlink /etc/resolv.conf || echo 'plain file'))"
+    cp -a /etc/resolv.conf "/etc/resolv.conf.bak-$(date +%F)" 2>/dev/null || true
+    ln -sf "$stub" /etc/resolv.conf
+    systemctl restart systemd-resolved
+    systemctl is-active -q NetworkManager && systemctl restart NetworkManager
+    systemctl restart tailscaled
+    sleep 3
+  else
+    step "resolv.conf already points at the resolved stub"
+  fi
+else
+  step "systemd-resolved not running: skipped the MagicDNS fix (check 'tailscale status' for a DNS warning)"
+fi
+
+# 4. join the tailnet
+if tailscale status >/dev/null 2>&1; then
+  step "tailscale: already logged in"
+else
+  step "tailscale up"
+  if [ -n "${TS_AUTHKEY:-}" ]; then
+    tailscale up --auth-key="$TS_AUTHKEY"
+  else
+    tailscale up   # prints a URL; open it on any device logged into the tailnet account
+  fi
+fi
+ip4="$(tailscale ip -4 | head -1)"
+
+# 5. hand-off
+echo
+tailscale status 2>&1 | grep -i -A2 'health\|warning' || echo "tailscale health: no warnings"
+cat <<MSG
+
+==============================================================================
+ $host joined the tailnet as $ip4 (ssh user: $user)
+==============================================================================
+In the Tailscale admin console (https://login.tailscale.com/admin/machines):
+  - $host -> "..." -> Disable key expiry. Otherwise it drops off the tailnet in ~180 days.
+
+On the LAPTOP:
+  1. ~/.ssh/config:
+       Host <alias> $host
+         HostName $ip4
+         User $user
+  2. ssh-copy-id <alias>            # password once, keys from then on
+     ssh -o BatchMode=yes <alias> hostname   # confirm it logs in without asking
+  3. add it to cluster-utilities/fleet/hosts.yaml (status: active), then run fleet-audit
+
+Optional, on this machine: clone cluster-utilities + agent-utilities into ~/Projects.
+MSG
