@@ -24,18 +24,24 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
      UNLISTED, LEGACY, EMPTY (an empty dir: `rmdir` it). `UNDECIDED` means decide the owner first.
    - **Stop flags.** Any of these means the copy holds something not saved elsewhere: NOGIT, NESTED,
      NOREMOTE, LOCALREMOTE, SUBMODULE-NOBACKUP, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, HIDDENIDX,
-     LFS, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then re-run:
+     LFS, REPLACE, IGNORED, WORKTREES, SUBMODULES, FETCHFAIL, ERR. Resolve each one, then re-run.
+     `IGNORED` and `LFS` stay on re-runs even when resolved, so for those two, a check you do yourself
+     (and note down) is what clears them:
      - `IGNORED:n` (usually the data): copy and verify it as in "Moving gitignored data" below.
        Git can't vouch for it.
-     - `LFS:n`: run `git lfs push --all <forge-remote>` (it uploads only what the server lacks) and
-       check that it exits 0, or keep the copy.
+     - `LFS:n`: the local LFS store stays after a successful upload, so the flag stays too. Run
+       `git lfs push --all <forge-remote>` (it uploads only what the server lacks). If that exits 0,
+       the LFS content is safe and this flag no longer blocks deleting *that* copy. Don't empty the
+       store just to make the flag go away.
      - `HIDDENIDX:n`: `git ls-files -v | grep -E '^([a-z]|S) '` lists the files. Clear the bit
        (`git update-index --no-assume-unchanged / --no-skip-worktree <f>`) and commit any real edit.
+     - `REPLACE:n`: `git for-each-ref refs/replace` lists them. If a replacement holds content you
+       want, commit that content normally. Then `git replace -d <ref>` and re-run.
    - Deleting a whole root (e.g. `~/code`) also needs no `LOOSE:n` row for it.
 
    **What counts as "saved elsewhere":** only a remote on a forge (github.com, gitlab.com,
-   git.overleaf.com, bitbucket.org, codeberg.org), checked by both its configured and its rewritten
-   URL. A copy on another fleet box (`user@lab:…`, `ssh://lab/…`) or a local path is not a backup.
+   git.overleaf.com, bitbucket.org, codeberg.org), checked by its configured URL, its rewritten
+   (insteadOf) URL and every push URL. A copy on another fleet box (`user@lab:…`, `ssh://lab/…`) or a local path is not a backup.
 
    **Not counted as rebuildable** (so they show up as IGNORED): `.ipynb_checkpoints`, `.cache`,
    `env/`. Only `.venv`, `venv`, `__pycache__`, `node_modules`, pytest/mypy/ruff caches, `.tox`/`.nox`
@@ -46,7 +52,13 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    - annotated tag objects you never pushed, when they point at a commit that *is* pushed;
    - git-annex content.
 
-   If any of that matters for a repo, keep a full copy (`tar` or `git bundle create x.bundle --all`).
+   If any of that matters for a repo, archive the **whole repo directory** before deleting it,
+   `.git` included (that's where the reflog, LFS store and annex objects live), and check the archive:
+   ```bash
+   tar -C <parent> -czf <repo>-$(date +%F).tar.gz <repo> && tar -tzf <repo>-$(date +%F).tar.gz >/dev/null && echo OK
+   ```
+   `git bundle --all` is **not** a full copy: it leaves out reflog-only commits and anything outside git
+   objects (LFS, annex).
 
 ## Moving gitignored data to the owner host
 
@@ -130,12 +142,20 @@ FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # raise the per-host time 
 `fleet-audit --help` explains every flag. Exit 0 means every requested host was fully audited, 1 means
 some host was not, and 2 means a usage or inventory error.
 
-`UNPUSHED` counts commits reachable from local branches, tags or HEAD that no remote-tracking ref
-contains. A branch that was squash-merged and then deleted on GitHub shows up here too, so look at
-`git log --branches --tags HEAD --not --remotes` before assuming work is at risk.
+`UNPUSHED` counts commits reachable from any local ref (branches, tags, notes, replace refs, every
+worktree's HEAD; not the stash) that the forge remotes don't have. With `--fetch`, "have" means the
+server advertises it right now (`git ls-remote`). A branch that was squash-merged and then deleted on
+GitHub shows up here too. To see the actual commits before assuming work is at risk (forge remote
+`origin` here):
+```bash
+git fetch --prune origin
+git log --oneline --exclude='refs/remotes/*' --exclude=refs/stash --all --not --remotes=origin
+```
 
 Keep `hosts.yaml` / `projects.yaml` in their flat format, because they are read with awk. Inline
-`# comments` are fine. Lines the parser doesn't understand are reported on stderr, not silently dropped.
+`# comments` are fine. In `hosts.yaml`, any line the parser doesn't understand (a tab, a host id at
+column 0, a stray top-level key, a missing status) stops the run with exit 2 before anything is
+scanned. In `projects.yaml` it's a warning.
 
 ## Auth notes
 
