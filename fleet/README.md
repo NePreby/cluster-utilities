@@ -84,10 +84,13 @@ Never put the key on the command line or in an env var you type: it would land i
 the process list. `--authkey` reads it hidden and hands it to tailscale through a 0600 temp file.
 
 It runs `pacman -Syu` (full upgrade, so openssh isn't half-upgraded), installs and enables `sshd` +
-`tailscaled`, applies the CachyOS MagicDNS fix (the resolv.conf symlink), and joins the tailnet. The
-DNS change is guarded: it only switches if DNS works beforehand and the resolved stub exists, keeps a
-timestamped `/etc/resolv.conf.bak-*`, and restores it (exit 1) if DNS breaks afterwards. It refuses
-to run over SSH (the restarts can cut the session) unless you pass `--force`. It leaves password login on. It also installs the SSH
+`tailscaled` (plus `bind`, for `dig`), applies the CachyOS MagicDNS fix (the resolv.conf symlink),
+and joins the tailnet. If the upgrade installed a new kernel, tailscale's `tun` module can't load
+until a reboot. It then says so and exits: reboot and run it again. The DNS change is guarded. It
+only switches if DNS works beforehand and resolved's stub listener answers, and it keeps a timestamped
+`/etc/resolv.conf.bak-*`. Afterwards it checks DNS through `/etc/resolv.conf` itself and restores the
+backup (exit 1) if that broke. It refuses to run over SSH, which it detects even through sudo, because
+the restarts can cut the session. `--force` overrides that. It leaves password login on. It also installs the SSH
 login menu (1 plain fish / 2 tmux / 3 herdr, plain fish after 5 s) into `~/.config/fish/conf.d/`, but only
 if your login shell is fish. That menu is an embedded copy of
 `linux-config/home/dot_config/fish/conf.d/ssh-session-menu.fish`, so if you change the menu there,
