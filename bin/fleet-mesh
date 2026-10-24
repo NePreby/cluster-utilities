@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Let every lab box ssh to every other lab box with a key and no prompt (lab <-> lab mesh).
+#
+# Run on the laptop, after the laptop already has key access to each box (ONBOARDING-AGENT.md B3).
+# Reads the active, non-local hosts from fleet/hosts.yaml and, for each one:
+#   - makes sure it has ~/.ssh/id_ed25519 (created with no passphrase if missing, so agents can use it)
+#   - adds the OTHER boxes' public keys to ~/.ssh/authorized_keys, one line each, commented
+#     `fleet-mesh:<tailscale name>` so a single box can be revoked later (keeps existing lines)
+#   - adds the other boxes' host keys to ~/.ssh/known_hosts under name, short name, alias and IP.
+#     Host keys are read over the laptop's own (already verified) connections, not ssh-keyscan,
+#     so there's no trust-on-first-use step on the lab side. A known IP with a different key is
+#     reported, never overwritten
+#   - rewrites a marked `# >>> fleet-mesh` block in ~/.ssh/config with the same aliases as the laptop
+# Idempotent: rerun it after adding a machine to hosts.yaml. Then it checks every pair.
+# The laptop is not added to the lab boxes' known_hosts/authorized_keys: the laptop reaches in,
+# the lab boxes don't reach out to it.
+#
+#   fleet-mesh            install + check
+#   fleet-mesh --check    only the NxN check
+set -euo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+hosts="$here/fleet/hosts.yaml"
+check_only=0; [ "${1:-}" = --check ] && check_only=1
+
+# id ssh tailscale ip, for every active host that isn't `ssh: local`
+mapfile -t rows < <(awk '
+  /^hosts:/ {inh=1; next}
+  inh && /^  [A-Za-z0-9_-]+:/ { if (id && st=="active" && ssh!="local") print id, ssh, ts, ip; id=$1; sub(":","",id); ssh=ts=ip=st="" }
+  inh && /^    ssh:/       {ssh=$2}
+  inh && /^    tailscale:/ {ts=$2}
+  inh && /^    ip:/        {ip=$2}
+  inh && /^    status:/    {st=$2}
+  END { if (id && st=="active" && ssh!="local") print id, ssh, ts, ip }' "$hosts")
+[ ${#rows[@]} -ge 2 ] || { echo "fleet-mesh: fewer than 2 active lab hosts in $hosts" >&2; exit 2; }
+
+check() {
+  local bad=0 a b
+  for a in "${rows[@]}"; do
+    read -r _ sa ta _ <<<"$a"
+    printf '%-24s' "from $sa:"
+    for b in "${rows[@]}"; do
+      read -r _ sb tb _ <<<"$b"
+      [ "$sa" = "$sb" ] && { printf ' %s:-' "$sb"; continue; }
+      o=$(ssh -o BatchMode=yes "$sa" "timeout 15 ssh -o BatchMode=yes -o ControlPath=none -o ConnectTimeout=8 $sb hostname 2>&1 </dev/null" 2>&1 || true)
+      if [ "$(echo "$o" | tr A-Z a-z)" = "$(echo "$tb" | tr A-Z a-z)" ]; then printf ' %s:ok' "$sb"; else printf ' %s:FAIL' "$sb"; bad=1; fi
+    done; echo
+  done
+  [ $bad = 0 ] && echo "fleet-mesh: all pairs ok" || { echo "fleet-mesh: some pairs FAILED" >&2; return 1; }
+}
+[ $check_only = 1 ] && { check; exit; }
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+: > "$tmp/auth"; : > "$tmp/known"; : > "$tmp/cfg"
+for r in "${rows[@]}"; do
+  read -r id sa ts ip <<<"$r"
+  # user key (created if missing) and host key, over the laptop's verified connection
+  ssh -o BatchMode=yes "$sa" bash -s > "$tmp/raw" <<'EOF'
+set -e
+[ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519 -C "$USER@$(hostname)"
+cut -d' ' -f1,2 ~/.ssh/id_ed25519.pub
+cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub
+EOF
+  echo "$(sed -n 1p "$tmp/raw") fleet-mesh:$ts" >> "$tmp/auth"
+  hk=$(sed -n 2p "$tmp/raw")
+  # the laptop's known_hosts must already have this exact host key for the IP
+  known=$(ssh-keygen -F "$ip" || true)
+  grep -qF "${hk#* }" <<<"$known" || { echo "fleet-mesh: $sa ($ip) host key doesn't match the laptop's known_hosts; stopping" >&2; exit 1; }
+  short=${ts%-psy}
+  echo "$ts,$short,$sa,$ip $hk" >> "$tmp/known"
+  names="$sa"; [ "$id" != "$sa" ] && names="$names $id"
+  # keep extra aliases the laptop uses for this box (e.g. `lab` for lab8)
+  extra=$(awk -v h="$sa" '$1=="Host" { for (i=2;i<=NF;i++) if ($i==h) { for (j=2;j<=NF;j++) print $j } }' ~/.ssh/config | { grep -vxF -e "$sa" -e "$short" -e "$ts" || true; } | tr '\n' ' ')
+  printf 'Host %s %s%s %s\n  HostName %s\n  User %s\n\n' "$names" "$extra" "$short" "$ts" "$ip" "$(ssh -G "$sa" | awk '$1=="user"{print $2}')" >> "$tmp/cfg"
+done
+
+for r in "${rows[@]}"; do
+  read -r _ sa ts _ <<<"$r"
+  { printf 'ME=%q\nAUTH=%q\nKNOWN=%q\nCFG=%q\n' "$ts" "$(grep -v " fleet-mesh:$ts\$" "$tmp/auth")" "$(grep -v "^$ts," "$tmp/known")" "$(cat "$tmp/cfg")"
+    cat <<'EOF'
+set -e
+umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/known_hosts ~/.ssh/config
+add=0; while IFS= read -r l; do k=$(echo "$l" | cut -d' ' -f2); grep -qF "$k" ~/.ssh/authorized_keys || { echo "$l" >> ~/.ssh/authorized_keys; add=$((add+1)); }; done <<<"$AUTH"
+kh=0; while IFS= read -r l; do ip=$(echo "$l" | cut -d' ' -f1 | cut -d, -f4); k=$(echo "$l" | cut -d' ' -f3)
+  if ssh-keygen -F "$ip" -f ~/.ssh/known_hosts | grep -q .; then
+    ssh-keygen -F "$ip" -f ~/.ssh/known_hosts | grep -qF "$k" || echo "WARN: $ip is in known_hosts with a DIFFERENT key; left as is"
+  else echo "$l" >> ~/.ssh/known_hosts; kh=$((kh+1)); fi
+done <<<"$KNOWN"
+cp ~/.ssh/config ~/.ssh/config.bak-fleet-mesh
+sed -i '/^# >>> fleet-mesh/,/^# <<< fleet-mesh/d' ~/.ssh/config
+{ echo "# >>> fleet-mesh (written by cluster-utilities bin/fleet-mesh from the laptop; edits here are overwritten)"; echo "$CFG"; echo "# <<< fleet-mesh"; } >> ~/.ssh/config
+chmod 600 ~/.ssh/authorized_keys ~/.ssh/config
+echo "$ME: +$add authorized_keys, +$kh known_hosts, config block written"
+EOF
+  } | ssh -o BatchMode=yes "$sa" bash -s
+done
+check

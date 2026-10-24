@@ -152,13 +152,13 @@ drops off the tailnet after ~180 days, which you'd only notice once you're remot
 
 **3. On the laptop**, using the snippet `fleet-onboard` printed:
 ```sshconfig
-Host lab2 lkj0XX-psy
+Host lab12 lkj012 lkj012-psy   # alias from the hostname: lkj0NN-psy -> labNN
   HostName 100.x.y.z        # Tailscale IP
   User yorguin
 ```
 ```bash
-ssh-copy-id lab2                          # password once
-ssh -o BatchMode=yes lab2 hostname        # must succeed with no prompt; that's what agents use
+ssh-copy-id lab12                         # password once
+ssh -o BatchMode=yes lab12 hostname       # must succeed with no prompt; that's what agents use
 ```
 The global `Host *` ControlMaster block (`../lab-access.md`) applies automatically.
 
@@ -169,13 +169,20 @@ and `ssh lkj0XX-psy` (MagicDNS) still work. Do this before onboarding the next m
 confirm it's reachable (`== <id>: audited`). Infra repos are `[*]` in `projects.yaml`, so they're
 expected on the new host with no edit needed.
 
+**6. Lab ↔ lab mesh.** `bin/fleet-mesh` (on the laptop) makes every active lab box in `hosts.yaml`
+trust every other one: each gets a key, the others' keys in `authorized_keys` (commented
+`fleet-mesh:<name>`, so one box can be revoked), their host keys in `known_hosts` (read over the
+laptop's verified connections, not keyscanned), and the same `labNN` aliases in a marked block of
+`~/.ssh/config`. It finishes with an every-pair check. Idempotent; `--check` only checks. The laptop
+reaches in; the lab boxes don't get a key to the laptop.
+
 ## Auditing
 
 ```bash
 fleet-audit                 # problems only, every active host (~5 s)
 fleet-audit --fetch --all   # the run to use before deleting anything (fetch --prune, every row)
 fleet-audit --size          # add du sizes, incl. each repo's ignored data (slow on the big data dirs)
-fleet-audit lab             # one host
+fleet-audit lab8            # one host
 FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # raise the per-host time limit
 ```
 `fleet-audit --help` explains every flag. Exit 0 means every requested host was fully audited, 1 means

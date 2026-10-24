@@ -244,6 +244,8 @@ ip4="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 ip4="${ip4:-<no IP yet: approve $host in the admin console, then run 'tailscale ip -4'>}"
 
 # 6. hand-off
+# ssh alias follows the hostname: lkj0NN-psy -> labNN (fleet/README.md)
+ssh_alias='<alias>'; [[ ${host,,} =~ ^lkj0*([0-9]+)-psy$ ]] && ssh_alias="lab${BASH_REMATCH[1]}"
 echo
 tailscale status 2>&1 | grep -i -A2 'health\|warning' || echo "tailscale health: no warnings"
 cat <<MSG
@@ -256,15 +258,16 @@ In the Tailscale admin console (https://login.tailscale.com/admin/machines):
 
 On the LAPTOP:
   1. ~/.ssh/config:
-       Host <alias> $host
+       Host $ssh_alias $host
          HostName $ip4
          User $user
-  2. ssh-copy-id <alias>            # password once, keys from then on
-     ssh -o BatchMode=yes <alias> hostname   # confirm it logs in without asking
+  2. ssh-copy-id $ssh_alias            # password once, keys from then on
+     ssh -o BatchMode=yes $ssh_alias hostname   # confirm it logs in without asking
   3. add it to cluster-utilities/fleet/hosts.yaml (status: active), then run fleet-audit
-     and check for '== <id>: audited'
+     and check for '== $ssh_alias: audited'
+  4. bin/fleet-mesh   # lab <-> lab keys; ends with 'all pairs ok'
 
-Then reboot this machine once and check from the laptop that 'ssh <alias>' and MagicDNS
+Then reboot this machine once and check from the laptop that 'ssh $ssh_alias' and MagicDNS
 ('ssh $host') still work, before onboarding the next one.
 
 Optional, on this machine: clone cluster-utilities + agent-utilities into ~/Projects.

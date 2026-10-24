@@ -16,7 +16,9 @@ Before the repo is cloned, read this file with
   was). The owner is signed in to the browser on that machine, as the tailnet account `yjmantilla@`
   (tailnet `tail2e782e.ts.net`).
 - Claude Code and `gh` are logged in. git has no identity set yet.
-- Already on the tailnet: `zephyrus-m16` (laptop), `lkj008-psy` (ssh alias `lab`), `lkj010-psy` (`lab2`).
+- Already on the tailnet (2026-10-24): `zephyrus-m16` (laptop) and all seven lab workstations, `lkj003`, `004`,
+  `006`, `007`, `008`, `009`, `010` `-psy`. **SSH aliases follow the hostname: `lkj0NN-psy` → `labNN`** (no
+  leading zero; `lab8` also answers to the old `lab`).
   Progress and the remaining machines are tracked in the "onboard the remaining lab workstations" issue.
 
 ## Hard rules
@@ -136,34 +138,35 @@ Before the repo is cloned, read this file with
 4. **Owner, in the [Tailscale admin console](https://login.tailscale.com/admin/machines):** on the new
    machine, `…` → **Disable key expiry**. Otherwise it drops off the tailnet after about 180 days.
 5. **Queue side B as an issue** instead of doing it from here. Copy the issue "fleet: finish onboarding
-   lkj010-psy (lab2) from the laptop": the A3 results, the `~/.ssh/config` block (next free alias:
-   `lab3`, …), a ready-to-paste `hosts.yaml` entry with the spec line, the B checks, the reboot check and
+   lkj010-psy (lab2) from the laptop" (#1; it predates the naming rule): the A3 results, the `~/.ssh/config`
+   block (alias `labNN` from the hostname), a ready-to-paste `hosts.yaml` entry with the spec line, the B checks, the reboot check and
    the key-expiry reminder if A4 isn't done yet. Then update the machine table in the "onboard the
    remaining lab workstations" issue.
 
 ## B. On the laptop (agent running in `~/code/cluster-utilities` or `~/Projects/cluster-utilities`)
 
 1. Check it's visible: `tailscale status | grep <name>` → online.
-2. Add an alias to `~/.ssh/config`. Pick a short alias: `lab2`, `lab3`, … in onboarding order.
+2. Add an alias to `~/.ssh/config`, named after the machine: `lkj0NN-psy` → `labNN` (the examples below use
+   `lab12` for a hypothetical `lkj012-psy`).
    ```sshconfig
-   Host lab2 <name>
+   Host lab12 lkj012 <name>
      HostName 100.x.y.z
      User <user>
    ```
    The global `Host *` ControlMaster block already applies.
-3. **Owner** (asks for that machine's password once): `! ssh-copy-id lab2`
+3. **Owner** (asks for that machine's password once): `! ssh-copy-id lab12`
 4. Verify key login with no prompt, which is what agents use:
    ```bash
-   ssh -o BatchMode=yes -o ControlPath=none lab2 'hostname; echo KEY_OK'
+   ssh -o BatchMode=yes -o ControlPath=none lab12 'hostname; echo KEY_OK'
    ```
-5. The menu only shows in an interactive session, so ask the owner to run `ssh lab2` and confirm the
+5. The menu only shows in an interactive session, so ask the owner to run `ssh lab12` and confirm the
    `Session: 1) none 2) tmux 3) herdr` prompt appears and falls back to fish after 5 s.
-   (`ssh -o BatchMode=yes lab2 cmd` and scp/rsync must NOT show it.)
-6. Register it in `fleet/hosts.yaml`. Copy the commented `lab2` template. Keep the format exact: 2-space
+   (`ssh -o BatchMode=yes lab12 cmd` and scp/rsync must NOT show it.)
+6. Register it in `fleet/hosts.yaml`. Copy the commented `labNN` template. Keep the format exact: 2-space
    host id, 4-space keys, no tabs, roots must start with `/` or `~`.
    ```yaml
-     lab2:
-       ssh: lab2
+     lab12:
+       ssh: lab12
        tailscale: <name>
        ip: 100.x.y.z
        role: research
@@ -172,13 +175,16 @@ Before the repo is cloned, read this file with
        roots: ~/Projects
        status: active
    ```
-   Then `bin/fleet-audit lab2` must end with `== lab2: audited (…)` and exit 0. A `~/Projects` that doesn't
+   Then `bin/fleet-audit lab12` must end with `== lab12: audited (…)` and exit 0. A `~/Projects` that doesn't
    exist yet shows `ROOT-MISSING`, which is fine.
 7. **Reboot check (owner reboots the new machine).** Afterwards, from the laptop:
-   `ssh -o BatchMode=yes lab2 hostname` works, and `ssh <name> hostname` (MagicDNS) works.
+   `ssh -o BatchMode=yes lab12 hostname` works, and `ssh <name> hostname` (MagicDNS) works.
    Leave it untouched at the login screen for 20+ minutes and check again: it must still answer
    (that's the no-suspend test).
-8. Commit the `hosts.yaml` change (and nothing else), and ask before pushing.
+8. **Lab ↔ lab mesh:** `bin/fleet-mesh` (from the laptop). It reads `hosts.yaml`, gives the new machine a key,
+   adds it to every other lab machine's `authorized_keys`/`known_hosts`/`~/.ssh/config` (and theirs to it),
+   then checks every pair. It ends with `fleet-mesh: all pairs ok`. Rerunning it is safe.
+9. Commit the `hosts.yaml` change (and nothing else), and ask before pushing.
 
 ## If something goes wrong
 | Symptom | What to do |

@@ -4,7 +4,8 @@
 # awk, since none of the hosts ship a YAML parser. Alliance clusters are NOT here — they're
 # reached via ~/.ssh/config + cluster-login (see AGENT.md); this is the Tailscale fleet.
 #
-#   ssh:        the ~/.ssh/config alias, or `local` for the machine you're sitting at
+#   ssh:        the ~/.ssh/config alias, or `local` for the machine you're sitting at.
+#               Lab ids/aliases follow the hostname: lkj0NN-psy -> labNN (no leading zero).
 #   tailscale:  device name on the tailnet (tail2e782e.ts.net) = the OS hostname
 #   auth:       how ssh logs in — `key` / `key+password` (password still enabled server-side)
 #   roots:      dirs that hold repos on this host, space-separated (audited by fleet-audit)
@@ -20,20 +21,73 @@ hosts:
     auth: n/a
     roots: ~/Projects ~/code
     status: active
-  lab:
-    ssh: lab
+  lab3:
+    ssh: lab3
+    tailscale: lkj003-psy
+    ip: 100.103.1.57
+    role: research
+    spec: Xeon E3-1241 v3 (8 threads), 32 GB RAM, Quadro P2000, 924 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  lab4:
+    ssh: lab4
+    tailscale: lkj004-psy
+    ip: 100.95.248.31
+    role: research
+    spec: Xeon E3-1241 v3 (8 threads), 32 GB RAM, Quadro K2200, 405 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  lab6:
+    ssh: lab6
+    tailscale: lkj006-psy
+    ip: 100.124.175.38
+    role: research
+    spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 494 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  lab7:
+    ssh: lab7
+    tailscale: lkj007-psy
+    ip: 100.80.177.26
+    role: research
+    spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 405 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  lab8:
+    ssh: lab8
     tailscale: lkj008-psy
     ip: 100.86.65.72
-    role: research — default home for research repos + their data
-    spec: Xeon E3-1240 v5 (8 cores), 31 GB RAM, Quadro K620, 440 GB /home, CachyOS
+    role: research — default home for research repos + their data (also `lab` alias)
+    spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects ~/code
     status: active
-  # The other lab workstations (similar spec, CachyOS installed) — fill in once onboarded with
-  # bin/fleet-onboard, then flip status to active. See fleet/README.md.
-  # lab2:
-  #   ssh: lab2
-  #   tailscale: lkj0XX-psy
+  lab9:
+    ssh: lab9
+    tailscale: lkj009-psy
+    ip: 100.112.76.58
+    role: research
+    spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS; login shell bash (no SSH menu)
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  lab10:
+    ssh: lab10
+    tailscale: lkj010-psy
+    ip: 100.127.148.40
+    role: research
+    spec: Xeon E3-1245 v5 (8 threads), 32 GB RAM, Quadro P2000, 434 GB /home, CachyOS
+    auth: key+password
+    roots: ~/Projects
+    status: active
+  # Template for the next machine (lkj0NN-psy -> labNN). Uncomment with the same 2/4-space indent.
+  # labNN:
+  #   ssh: labNN
+  #   tailscale: lkj0NN-psy
   #   ip: 100.x.y.z
   #   role: research
   #   spec:

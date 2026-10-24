@@ -45,7 +45,7 @@
 #   fleet-audit --all           # every entry, including clean + correctly placed ones (as `ok`)
 #   fleet-audit --fetch         # fetch + ask each forge what it has, so UNPUSHED/BEHIND are current
 #   fleet-audit --size          # add du sizes of each repo and of its ignored data (slow)
-#   fleet-audit lab             # only these host ids
+#   fleet-audit lab8            # only these host ids
 #   FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # per-host time limit (default 600s, 1800s with --fetch)
 # (FLEET_AUDIT_FORGES / FLEET_AUDIT_GIT_SSH are test hooks and only apply to `ssh: local` hosts.)
 #
