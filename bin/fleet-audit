@@ -139,19 +139,24 @@ FORGES=" ${FLEET_AUDIT_FORGES:-github.com gitlab.com git.overleaf.com bitbucket.
 g() { local d=$1; shift; git --no-optional-locks -C "$d" "$@"; }
 lines() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l; }
 
-# add one worktree's status into dirty/unt/ign (+ ignpaths); 1 on git error
+# add one worktree's status into dirty/unt/ign (+ ignpaths); 1 on git error.
+# -z (NUL-separated, never quoted) so paths with spaces or odd bytes stay exact for du; a rename or
+# copy entry (R/C in the XY code) is followed by one extra record, the source path, which is skipped.
 count_status() {
-  local d=$1 out line p
-  out=$(g "$d" -c core.quotePath=false status --porcelain --untracked-files=normal --ignored=matching --ignore-submodules=none) || return 1
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    case "$line" in
+  local d=$1 tf rec p skip=0 rc=0
+  tf=$(mktemp)
+  g "$d" status --porcelain -z --untracked-files=normal --ignored=matching --ignore-submodules=none >"$tf" || rc=1
+  while IFS= read -r -d '' rec; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$rec" in
       '?? '*) unt=$((unt+1)) ;;
-      '!! '*) p=${line#!! }; p=${p%/}
+      '!! '*) p=${rec#!! }; p=${p%/}
               if [[ ! "$p" =~ $REGEN ]]; then ign=$((ign+1)); ignpaths+=("$d/$p"); fi ;;
-      *) dirty=$((dirty+1)) ;;
+      *) dirty=$((dirty+1)); [[ "${rec:0:2}" == *[RC]* ]] && skip=1 ;;
     esac
-  done <<<"$out"
+  done <"$tf"
+  rm -f "$tf"
+  return $rc
 }
 
 # host part of a git URL (lowercased); empty for a local path
