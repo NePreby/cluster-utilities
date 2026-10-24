@@ -3,12 +3,17 @@
 Goal: a lab workstation reachable from the laptop as `ssh <alias>` over Tailscale, with key login and the
 SSH session menu (plain fish / tmux / herdr). Background and the full procedure: `fleet/README.md`.
 
+Before the repo is cloned, read this file with
+`gh api repos/yjmantilla/cluster-utilities/contents/fleet/ONBOARDING-AGENT.md -H 'Accept: application/vnd.github.raw'`.
+
 ## Starting state of each new machine (2026-10)
 - CachyOS, upgraded recently. The owner's login shell is **fish**.
-- Tailscale **installed but not logged in**. The owner is signed in to the browser on that machine, as the
-  tailnet account `yjmantilla@` (tailnet `tail2e782e.ts.net`).
-- Claude Code and `gh` are logged in.
-- Already on the tailnet: `zephyrus-m16` (laptop), `lkj008-psy` (ssh alias `lab`).
+- Tailscale is installed. It may not be logged in, or it may be **logged in to another tailnet** (lkj010-psy
+  was). The owner is signed in to the browser on that machine, as the tailnet account `yjmantilla@`
+  (tailnet `tail2e782e.ts.net`).
+- Claude Code and `gh` are logged in. git has no identity set yet.
+- Already on the tailnet: `zephyrus-m16` (laptop), `lkj008-psy` (ssh alias `lab`), `lkj010-psy` (`lab2`).
+  Progress and the remaining machines are tracked in the "onboard the remaining lab workstations" issue.
 
 ## Hard rules
 - **Never run `fleet-onboard` over SSH.** It restarts NetworkManager and tailscaled; it refuses anyway
@@ -20,7 +25,9 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
 - **Password ssh login stays enabled on purpose.** Don't run `bin/harden-sshd-keyonly`, and don't edit
   sshd_config.
 - Remote shells are fish. Send scripts as `ssh -o BatchMode=yes <alias> bash -s <<'EOF' … EOF`.
-- Do one machine end to end, including the reboot check, before starting the next.
+- Do one machine end to end, including the reboot check, before starting the next. An agent on the new
+  machine does side A only and queues side B as an issue (A5), but the next machine still waits until
+  that issue's reboot check has passed.
 
 ## A. On the new machine (agent running there, or the owner by hand)
 
@@ -37,10 +44,14 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
    If that last command says `Permission denied (publickey)`, this machine has no key on GitHub yet:
    `ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 && gh ssh-key add ~/.ssh/id_ed25519.pub -t <name>`.
    If `gh` lacks the scope, the **owner** runs `gh auth refresh -s admin:public_key` (browser step) first.
-   Then make SSH the default for `gh` and clone:
+   Then make SSH the default for `gh`, set the git identity (otherwise `git commit` fails with
+   "Author identity unknown") and clone both infra repos:
    ```bash
    gh config set git_protocol ssh
+   git config --global user.name yorguin
+   git config --global user.email yjmantilla@gmail.com
    gh repo clone yjmantilla/cluster-utilities ~/Projects/cluster-utilities
+   gh repo clone yjmantilla/agent-utilities ~/Projects/agent-utilities
    ```
    **Keep Claude Code transcripts.** By default Claude Code deletes chat transcripts older than 30 days
    (`~/.claude/projects/`); we keep them. Merge `"cleanupPeriodDays": 36500` into `~/.claude/settings.json`
@@ -48,7 +59,18 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
    ```bash
    python3 -c 'import json,os;p=os.path.expanduser("~/.claude/settings.json");d=json.load(open(p)) if os.path.exists(p) else {};d["cleanupPeriodDays"]=36500;os.makedirs(os.path.dirname(p),exist_ok=True);open(p,"w").write(json.dumps(d,indent=2)+"\n")'
    ```
-2. **Owner, in a normal terminal on that machine** (needs sudo and a browser click):
+2. **Check which tailnet it's on first.** `fleet-onboard` sees any running login as "already logged in"
+   and skips `tailscale up`, even when it's another tailnet's login:
+   ```bash
+   tailscale status --json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["BackendState"],(d.get("CurrentTailnet") or {}).get("Name"),(d.get("CurrentTailnet") or {}).get("MagicDNSSuffix"))'
+   ```
+   `NeedsLogin`, or `Running … tail2e782e.ts.net`, is fine. Anything else: stop and tell the owner which
+   tailnet and account it's on and which other devices are on it (`tailscale status`). Leaving a tailnet
+   cuts off whoever uses this machine through it. Only after the owner confirms, add
+   `sudo tailscale logout` to the commands below.
+
+   **Owner, in a normal terminal on that machine** (needs sudo and a browser click). Give the owner the
+   exact commands as one block, with the logout line if needed and the lowercase name:
    ```bash
    bash ~/Projects/cluster-utilities/bin/fleet-onboard              # keep the current hostname
    bash ~/Projects/cluster-utilities/bin/fleet-onboard lkj0XX-psy   # or rename first (= Tailscale name)
@@ -66,9 +88,16 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
    readlink -f /etc/resolv.conf            # /run/systemd/resolve/stub-resolv.conf (or the script said why not)
    ls ~/.config/fish/conf.d/ssh-session-menu.fish
    whoami                                  # -> ssh user
+   ls /usr/lib/modules | grep -x "$(uname -r)"   # running kernel still installed (else: reboot pending)
+   lscpu | grep 'Model name'; free -g | awk '/Mem/{print $2" GB"}'; nvidia-smi -L; df -h /home   # spec line
    ```
 4. **Owner, in the [Tailscale admin console](https://login.tailscale.com/admin/machines):** on the new
    machine, `…` → **Disable key expiry**. Otherwise it drops off the tailnet after about 180 days.
+5. **Queue side B as an issue** instead of doing it from here. Copy the issue "fleet: finish onboarding
+   lkj010-psy (lab2) from the laptop": the A3 results, the `~/.ssh/config` block (next free alias:
+   `lab3`, …), a ready-to-paste `hosts.yaml` entry with the spec line, the B checks, the reboot check and
+   the key-expiry reminder if A4 isn't done yet. Then update the machine table in the "onboard the
+   remaining lab workstations" issue.
 
 ## B. On the laptop (agent running in `~/code/cluster-utilities` or `~/Projects/cluster-utilities`)
 
@@ -111,6 +140,8 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
 | Symptom | What to do |
 |---|---|
 | Clone fails: `ssh_askpass` / "Host key verification failed" | github.com isn't in known_hosts. Do the host-key part of A1 |
+| `fleet-onboard` says "already logged in" but the IP/tailnet isn't ours | Logged in to another tailnet. See A2: confirm with the owner, `sudo tailscale logout`, rerun |
+| `git commit`: "Author identity unknown" | Git identity not set: the `git config --global` lines in A1 |
 | "Refusing over SSH" | It's being run over ssh. Run it at the machine's keyboard |
 | "reboot, then rerun" | A kernel upgrade means tun can't load until reboot. Reboot, run the same command |
 | "DNS broke after the switch: restoring …" | The script already put the old resolv.conf back and exited 1. Report the output; don't retry blindly |
