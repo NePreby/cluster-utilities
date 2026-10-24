@@ -69,12 +69,28 @@ Before the repo is cloned, read this file with
    cuts off whoever uses this machine through it. Only after the owner confirms, add
    `sudo tailscale logout` to the commands below.
 
-   **Owner, in a normal terminal on that machine** (needs sudo and a browser click). Give the owner the
-   exact commands as one block, with the logout line if needed and the lowercase name:
+   **Owner, in a normal terminal on that machine** (needs sudo, and a browser click unless an auth key is
+   used). Give the owner the exact commands as one block, with the logout line if needed and the lowercase
+   name. Ask whether they have an auth key; if so, use the `--authkey` line:
    ```bash
    bash ~/Projects/cluster-utilities/bin/fleet-onboard              # keep the current hostname
    bash ~/Projects/cluster-utilities/bin/fleet-onboard lkj0XX-psy   # or rename first (= Tailscale name)
+   bash ~/Projects/cluster-utilities/bin/fleet-onboard --authkey lkj0XX-psy   # no browser: prompts (hidden) for the key
    ```
+   **Auth key (optional, the owner makes it, saves the browser login on each machine).** In the admin
+   console, [Settings → Keys](https://login.tailscale.com/admin/settings/keys) → **Generate auth key**:
+   - **Reusable: on** when doing several machines in one sitting (off for a single one).
+   - **Expiration: 1 day**, the shortest that covers the sitting. Revoke it on the same page when done.
+   - **Ephemeral: OFF.** Ephemeral devices are deleted from the tailnet when they go offline, so a lab
+     machine would vanish at its first reboot.
+   - **Pre-approved: on.** It only matters if device approval is enabled, and skips the
+     "waiting for admin approval" step.
+   - **Tags: none.** A tagged device belongs to the tag instead of `yjmantilla@`, which changes ACLs and
+     breaks the `yjmantilla@` checks here.
+
+   The key (`tskey-auth-…`) is shown once. The owner keeps it in a password manager and pastes it at
+   `fleet-onboard`'s hidden prompt. **Never ask for it, and never put it in a command, file, issue or
+   chat.** The key's expiry is separate from the device's key expiry: A4 is still needed.
    It runs `pacman -Syu`, installs openssh/fish/bind/…, enables sshd and tailscaled, installs the SSH menu,
    fixes MagicDNS only if needed (and restores the file if DNS would break), then runs `tailscale up`, which
    **prints a login URL**: the owner opens it in that machine's browser and approves. If it says
