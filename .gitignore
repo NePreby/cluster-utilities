@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# multi-model review panels: keep requests/reviews/synthesis, not raw CLI logs
+reviews/*/_run_logs/

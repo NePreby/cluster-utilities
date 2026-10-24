@@ -33,11 +33,17 @@ scp yorguin@<lkj008-lan-ip>:Projects/cluster-utilities/bin/fleet-onboard .
 ```
 or by cloning the repo if the machine has GitHub access. Then:
 ```bash
-./fleet-onboard lkj0XX-psy                         # interactive: open the printed URL anywhere
-TS_AUTHKEY=tskey-auth-… ./fleet-onboard lkj0XX-psy # or with the key from step 0
+bash fleet-onboard lkj0XX-psy             # interactive: open the printed URL anywhere
+bash fleet-onboard --authkey lkj0XX-psy   # or: prompts (hidden) for the key from step 0
 ```
-It sets the hostname, installs and enables `sshd` + `tailscaled`, applies the CachyOS MagicDNS fix
-(the resolv.conf symlink), and joins the tailnet. It leaves password login on. It also installs the SSH
+Never put the key on the command line or in an env var you type: it would land in shell history and
+the process list. `--authkey` reads it hidden and hands it to tailscale through a 0600 temp file.
+
+It runs `pacman -Syu` (full upgrade, so openssh isn't half-upgraded), installs and enables `sshd` +
+`tailscaled`, applies the CachyOS MagicDNS fix (the resolv.conf symlink), and joins the tailnet. The
+DNS change is guarded: it only switches if DNS works beforehand and the resolved stub exists, keeps a
+timestamped `/etc/resolv.conf.bak-*`, and restores it (exit 1) if DNS breaks afterwards. It refuses
+to run over SSH (the restarts can cut the session) unless you pass `--force`. It leaves password login on. It also installs the SSH
 login menu (1 plain fish / 2 tmux / 3 herdr, plain fish after 5 s) into `~/.config/fish/conf.d/`, but only
 if your login shell is fish. That menu is an embedded copy of
 `linux-config/home/dot_config/fish/conf.d/ssh-session-menu.fish`, so if you change the menu there,
@@ -58,7 +64,10 @@ ssh -o BatchMode=yes lab2 hostname        # must succeed with no prompt; that's 
 ```
 The global `Host *` ControlMaster block (`../lab-access.md`) applies automatically.
 
-**4. Register it.** Add a stanza to `hosts.yaml` with `status: active`, then run `fleet-audit` to
+**4. Reboot the new machine once**, then from the laptop check that `ssh -o BatchMode=yes <alias>`
+and `ssh lkj0XX-psy` (MagicDNS) still work. Do this before onboarding the next machine.
+
+**5. Register it.** Add a stanza to `hosts.yaml` with `status: active`, then run `fleet-audit` to
 confirm it's reachable.
 
 ## Auditing
