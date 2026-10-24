@@ -8,6 +8,8 @@ Before the repo is cloned, read this file with
 
 ## Starting state of each new machine (2026-10)
 - CachyOS, upgraded recently. The owner's login shell is **fish**.
+- KDE Plasma, which by default **suspends after 15 min idle**. A suspended machine drops off the tailnet
+  and nobody can wake it remotely, so A1 and A2 turn that off (and the reboot check in B7 tests it).
 - Tailscale is installed. It may not be logged in, or it may be **logged in to another tailnet** (lkj010-psy
   was). The owner is signed in to the browser on that machine, as the tailnet account `yjmantilla@`
   (tailnet `tail2e782e.ts.net`).
@@ -59,6 +61,18 @@ Before the repo is cloned, read this file with
    ```bash
    python3 -c 'import json,os;p=os.path.expanduser("~/.claude/settings.json");d=json.load(open(p)) if os.path.exists(p) else {};d["cleanupPeriodDays"]=36500;os.makedirs(os.path.dirname(p),exist_ok=True);open(p,"w").write(json.dumps(d,indent=2)+"\n")'
    ```
+   **Never sleep on idle (user side, no sudo).** Plasma's power management (powerdevil) runs the 15-min
+   idle action per user. Set it to "do nothing" in every power profile (`0` = nothing; `1` sleep,
+   `2` hibernate, `8` shut down are what we don't want). It's what System Settings → Power Management →
+   "When inactive: Do nothing" writes. The sudo half, which also covers the login screen and other
+   users, is in A2.
+   ```bash
+   for p in AC Battery LowBattery; do
+     kwriteconfig6 --file powerdevilrc --group $p --group SuspendAndShutdown --key AutoSuspendAction 0
+   done
+   qdbus6 org.kde.Solid.PowerManagement /org/kde/Solid/PowerManagement \
+     org.kde.Solid.PowerManagement.refreshStatus 2>/dev/null || echo "takes effect at next login"
+   ```
 2. **Check which tailnet it's on first.** `fleet-onboard` sees any running login as "already logged in"
    and skips `tailscale up`, even when it's another tailnet's login:
    ```bash
@@ -77,6 +91,14 @@ Before the repo is cloned, read this file with
    bash ~/Projects/cluster-utilities/bin/fleet-onboard lkj0XX-psy   # or rename first (= Tailscale name)
    bash ~/Projects/cluster-utilities/bin/fleet-onboard --authkey lkj0XX-psy   # no browser: prompts (hidden) for the key
    ```
+   Always add this line to the owner's block. It masks the sleep targets, so nothing (powerdevil, the
+   login screen after a reboot, another user's session, logind) can suspend or hibernate the machine:
+   ```bash
+   sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+   ```
+   Masking doesn't block poweroff, so the A1 powerdevil setting is still needed to keep idle from
+   choosing "shut down". Also check `IdleAction` is `ignore` (the default):
+   `busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager IdleAction`.
    **Auth key (optional, the owner makes it, saves the browser login on each machine).** In the admin
    console, [Settings → Keys](https://login.tailscale.com/admin/settings/keys) → **Generate auth key**:
    - **Reusable: on** when doing several machines in one sitting (off for a single one).
@@ -105,6 +127,8 @@ Before the repo is cloned, read this file with
    ls ~/.config/fish/conf.d/ssh-session-menu.fish
    whoami                                  # -> ssh user
    ls /usr/lib/modules | grep -x "$(uname -r)"   # running kernel still installed (else: reboot pending)
+   systemctl is-enabled sleep.target suspend.target hibernate.target   # masked / masked / masked
+   for p in AC Battery LowBattery; do kreadconfig6 --file powerdevilrc --group $p --group SuspendAndShutdown --key AutoSuspendAction; done   # 0 0 0
    lscpu | grep 'Model name'; free -g | awk '/Mem/{print $2" GB"}'; nvidia-smi -L; df -h /home   # spec line
    ```
 4. **Owner, in the [Tailscale admin console](https://login.tailscale.com/admin/machines):** on the new
@@ -150,6 +174,8 @@ Before the repo is cloned, read this file with
    exist yet shows `ROOT-MISSING`, which is fine.
 7. **Reboot check (owner reboots the new machine).** Afterwards, from the laptop:
    `ssh -o BatchMode=yes lab2 hostname` works, and `ssh <name> hostname` (MagicDNS) works.
+   Leave it untouched at the login screen for 20+ minutes and check again: it must still answer
+   (that's the no-suspend test).
 8. Commit the `hosts.yaml` change (and nothing else), and ask before pushing.
 
 ## If something goes wrong
@@ -166,3 +192,4 @@ Before the repo is cloned, read this file with
 | Machine missing from `tailscale status` on the laptop | On the machine, `tailscale status`: it must show `yjmantilla@`. If it shows another account, the owner runs `sudo tailscale logout && sudo tailscale up` and logs in as yjmantilla@ |
 | `ssh -o BatchMode=yes` → Permission denied | Key not installed: redo B3. Don't change sshd settings |
 | `fleet-audit` exits 2 | hosts.yaml format; the message names the line |
+| Machine goes offline after ~15 min idle, comes back when someone touches it | It's suspending. Redo the powerdevil part of A1 and the `systemctl mask` line in A2; check A3's sleep lines |

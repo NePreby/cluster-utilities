@@ -139,6 +139,14 @@ if your login shell is fish. That menu is an embedded copy of
 `linux-config/home/dot_config/fish/conf.d/ssh-session-menu.fish`, so if you change the menu there,
 re-paste it into the script. herdr itself isn't installed, so option 3 says so until you install it.
 
+**1b. Stop it sleeping.** KDE suspends after 15 min idle by default, and a suspended box is off the
+tailnet. Mask the sleep targets (covers the login screen and every user) and set powerdevil's idle
+action to "do nothing" (so idle can't shut it down either):
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+for p in AC Battery LowBattery; do kwriteconfig6 --file powerdevilrc --group $p --group SuspendAndShutdown --key AutoSuspendAction 0; done
+```
+
 **2. In the admin console**, disable key expiry for the new machine. Otherwise it silently
 drops off the tailnet after ~180 days, which you'd only notice once you're remote.
 
