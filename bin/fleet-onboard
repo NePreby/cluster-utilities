@@ -219,8 +219,8 @@ On the LAPTOP:
          User $user
   2. ssh-copy-id <alias>            # password once, keys from then on
      ssh -o BatchMode=yes <alias> hostname   # confirm it logs in without asking
-  3. add it to cluster-utilities/fleet/hosts.yaml (status: active) and append its id to the
-     infra lines in fleet/projects.yaml, then run fleet-audit
+  3. add it to cluster-utilities/fleet/hosts.yaml (status: active), then run fleet-audit
+     and check for '== <id>: audited'
 
 Then reboot this machine once and check from the laptop that 'ssh <alias>' and MagicDNS
 ('ssh $host') still work, before onboarding the next one.

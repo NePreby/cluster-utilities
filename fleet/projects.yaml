@@ -1,9 +1,10 @@
 # Which host owns each project — the "one repo, one machine" rule, written down.
 #
 #   <dir name>: [<host id>, ...]     host ids come from fleet/hosts.yaml
+#   <dir name>: [*]                  expected on every host (infra)
 #
-# A project lives on exactly ONE host unless it's infra that every machine needs (the `both` set
-# below lists more than one host on purpose). `[?]` = not decided yet. bin/fleet-audit flags:
+# A project lives on exactly ONE host unless it's infra that every machine needs ([*]), or it's
+# mid-migration (listed on two hosts, marked TEMP). `[?]` = not decided yet. bin/fleet-audit flags:
 #   UNLISTED  — a dir on some host that isn't in this file
 #   MISPLACED — a dir on a host that isn't in its list (stale copy, or the list is wrong)
 #   UNDECIDED — listed as [?]
@@ -15,9 +16,9 @@
 
 projects:
   # --- infra: on every host ---
-  cluster-utilities: [laptop, lab]
-  agent-utilities: [laptop, lab]
-  system-utilities: [laptop, lab]
+  cluster-utilities: [*]
+  agent-utilities: [*]
+  system-utilities: [*]
 
   # --- laptop: desktop, personal, needs a display/GPU ---
   linux-config: [laptop]

@@ -16,9 +16,29 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    desktop/personal things. Only infra (`cluster-utilities`, `agent-utilities`,
    `system-utilities`) lives on every host.
 2. **Repos live in `~/Projects`.** `~/code` is legacy and being emptied (fleet-audit flags it as LEGACY).
-3. **Before deleting a copy**, `fleet-audit` must show it with no NOGIT / NOREMOTE / UNPUSHED /
-   DIRTY / UNTRACKED / STASH flags. Ignored files (data, caches, results) are **not** checked, so
-   copy those to the owning host first (`rsync -aP --ignore-existing`) and compare sizes.
+3. **Before deleting a copy**, all of these must hold:
+   - a `fleet-audit --fetch --all` run ends with every host `audited` and exits 0. A host marked
+     `NOT AUDITED` or `INCOMPLETE` proves nothing, because a missing row is not a clean row;
+   - the copy's row is **present** and shows `ok`, or only info flags (BEHIND, UNLISTED/MISPLACED,
+     LEGACY). Any of NOGIT, NESTED, NOREMOTE, UNPUSHED, DETACHED, DIRTY, UNTRACKED, STASH, IGNORED,
+     WORKTREES, SUBMODULES, LOCALREMOTE, FETCHFAIL or ERR means it holds something not saved elsewhere;
+   - for `IGNORED:n` (usually the data), the ignored files are copied to the owner host and verified as
+     in "Moving gitignored data" below. Git can't vouch for them.
+   Deleting a whole root (e.g. `~/code`) also needs no `LOOSE:n` row for it.
+
+## Moving gitignored data to the owner host
+
+`rsync --ignore-existing` + "compare sizes" is NOT enough: it keeps an older, different file at the
+destination, and equal sizes don't mean equal contents. Instead:
+```bash
+# 1. copy into a separate staging dir, so nothing on the destination is overwritten
+rsync -aP <repo>/data/ lab:Projects/<repo>/_incoming-from-laptop/data/
+# 2. verify by checksum: prints nothing when every file arrived identical
+rsync -anci <repo>/data/ lab:Projects/<repo>/_incoming-from-laptop/data/
+# 3. on the owner host, merge the staging dir by hand. Where both sides have a file and they differ,
+#    decide which to keep; don't let a tool silently pick.
+```
+Stop anything still writing to the data first. Only then is the source copy deletable.
 
 ## Adding a lab machine (CachyOS already installed)
 
@@ -68,20 +88,27 @@ The global `Host *` ControlMaster block (`../lab-access.md`) applies automatical
 and `ssh lkj0XX-psy` (MagicDNS) still work. Do this before onboarding the next machine.
 
 **5. Register it.** Add a stanza to `hosts.yaml` with `status: active`, then run `fleet-audit` to
-confirm it's reachable.
+confirm it's reachable (`== <id>: audited`). Infra repos are `[*]` in `projects.yaml`, so they're
+expected on the new host with no edit needed.
 
 ## Auditing
 
 ```bash
-fleet-audit            # problems only, every active host (~5 s)
-fleet-audit --fetch    # git fetch first so BEHIND is current
-fleet-audit --size     # add du sizes (slow on the big data dirs)
-fleet-audit --all      # include clean, correctly placed dirs
-fleet-audit lab        # one host
+fleet-audit                 # problems only, every active host (~5 s)
+fleet-audit --fetch --all   # the run to use before deleting anything (fetch --prune, every row)
+fleet-audit --size          # add du sizes, incl. each repo's ignored data (slow on the big data dirs)
+fleet-audit lab             # one host
+FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # raise the per-host time limit
 ```
-`UNPUSHED` counts commits on local branches that aren't on any remote. A branch that was
-squash-merged and then deleted on GitHub shows up here too, so check `git log --branches --not --remotes`
-before assuming work is at risk.
+`fleet-audit --help` explains every flag. Exit 0 means every requested host was fully audited, 1 means
+some host was not, and 2 means a usage or inventory error.
+
+`UNPUSHED` counts commits reachable from local branches, tags or HEAD that no remote-tracking ref
+contains. A branch that was squash-merged and then deleted on GitHub shows up here too, so look at
+`git log --branches --tags HEAD --not --remotes` before assuming work is at risk.
+
+Keep `hosts.yaml` / `projects.yaml` in their flat format, because they are read with awk. Inline
+`# comments` are fine. Lines the parser doesn't understand are reported on stderr, not silently dropped.
 
 ## Auth notes
 

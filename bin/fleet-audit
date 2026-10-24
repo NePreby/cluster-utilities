@@ -2,24 +2,42 @@
 # Where is every repo, and is anything in it not saved anywhere else?
 #
 # Scans each repo root (e.g. ~/Projects, ~/code) on every ACTIVE host in fleet/hosts.yaml, over
-# `ssh -o BatchMode=yes` (or locally for `ssh: local`), and checks each dir against
-# fleet/projects.yaml. Read-only, except that --fetch runs `git fetch`. One row per (dir, host) that
-# has something to act on:
+# `ssh -o BatchMode=yes` (or locally for `ssh: local`), and checks each entry against
+# fleet/projects.yaml. Read-only (git runs with --no-optional-locks), except that --fetch runs
+# `git fetch --all --prune`. One row per entry that has something to act on:
 #
+#   unsaved work (any of these means: do NOT delete this copy)
 #   NOGIT        not a git repo (only copy, unless you've backed it up)
+#   NESTED:n     a non-git dir holding n git repos; each also gets its own row (e.g. kirby/katam)
 #   NOREMOTE     git repo with no remote (commits exist only here)
-#   UNPUSHED:n   commits on local branches not on any remote. May count branches that were
-#                squash-merged and whose commits are gone from the remote; check before worrying
-#   DIRTY:n      modified tracked files      UNTRACKED:n  untracked (not ignored) files
-#   STASH:n      stash entries               BEHIND:n     behind upstream (needs --fetch to be current)
-#   UNLISTED / MISPLACED / UNDECIDED         placement vs fleet/projects.yaml
-#   LEGACY       lives in ~/code (being migrated to ~/Projects)
+#   UNPUSHED:n   commits reachable from local branches, tags or HEAD that no remote-tracking ref has
+#   DETACHED     HEAD is detached (its commits are included in UNPUSHED)
+#   DIRTY:n      modified tracked files (incl. submodule changes)   UNTRACKED:n  untracked, not ignored
+#   STASH:n      stash entries
+#   IGNORED:n    gitignored files/dirs, minus regenerables (.venv, __pycache__, node_modules, caches).
+#                Usually DATA: copy it to the owner host before deleting. --size adds their du.
+#   WORKTREES:n  linked worktrees (their dirty/untracked are counted in; deleting this repo breaks them)
+#   SUBMODULES:n initialized submodules (their unpushed/dirty/untracked/stash are counted in)
+#   LOCALREMOTE  a remote is a local path or another fleet host, not a real backup
+#   FETCHFAIL    --fetch failed, so UNPUSHED/BEHIND come from stale refs
+#   ERR          a git command failed; the counts for this repo can't be trusted
+#   LOOSE:n      files/symlinks sitting directly in a root (not in any repo dir)
+#   info
+#   BEHIND:n     behind upstream (current only with --fetch)    EMPTY  empty dir
+#   UNLISTED / MISPLACED / UNDECIDED   placement vs fleet/projects.yaml
+#   LEGACY       lives in ~/code (being migrated to ~/Projects)    ROOT-MISSING  root doesn't exist
+#
+# A copy is only safe to delete if it shows `ok` in a `fleet-audit --fetch --all` run that ends with
+# every host "audited" (exit 0), and its gitignored data has been copied and verified (fleet/README.md).
 #
 #   fleet-audit                 # problems only, all active hosts
-#   fleet-audit --all           # every dir, including clean + correctly placed ones
-#   fleet-audit --fetch         # git fetch first so BEHIND is current (slower, touches network)
-#   fleet-audit --size          # add du sizes (slow on big data dirs)
+#   fleet-audit --all           # every entry, including clean + correctly placed ones (as `ok`)
+#   fleet-audit --fetch         # git fetch --all --prune first, so UNPUSHED/BEHIND are current
+#   fleet-audit --size          # add du sizes of each repo and of its ignored data (slow)
 #   fleet-audit lab             # only these host ids
+#   FLEET_AUDIT_TIMEOUT=3600 fleet-audit --fetch --size   # per-host time limit (default 600s, 1800s with --fetch)
+#
+# Exit: 0 every requested host fully audited · 1 some host NOT audited / incomplete · 2 usage/config error
 set -uo pipefail
 
 here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -30,107 +48,251 @@ show_all=0; fetch=0; size=0; only=()
 for a in "$@"; do
   case "$a" in
     --all) show_all=1 ;; --fetch) fetch=1 ;; --size) size=1 ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     -*) echo "unknown flag $a" >&2; exit 2 ;;
     *) only+=("$a") ;;
   esac
 done
 
-# --- parse hosts.yaml -> "id<TAB>ssh<TAB>roots" for active hosts ---
-hosts_tsv=$(awk '
-  /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-  /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { if (id && st=="active") print id "\t" ssh "\t" roots
-                                       id=$1; sub(":","",id); ssh=""; roots=""; st=""; next }
-  /^    ssh:/    { sub(/^    ssh:[[:space:]]*/,"");    sub(/[[:space:]]+#.*/,""); ssh=$0 }
-  /^    roots:/  { sub(/^    roots:[[:space:]]*/,"");  sub(/[[:space:]]+#.*/,""); roots=$0 }
-  /^    status:/ { sub(/^    status:[[:space:]]*/,""); sub(/[[:space:]]+#.*/,""); st=$0 }
-  END { if (id && st=="active") print id "\t" ssh "\t" roots }' "$HOSTS")
+# --- parse hosts.yaml -> "id<TAB>ssh<TAB>roots<TAB>status" for EVERY host ---
+# Every line is normalized first (inline `# …` comments + trailing whitespace stripped), so an
+# annotated host line (`  lab2:   # new box`) still starts a new host instead of merging into the last.
+hosts_all=$(awk '
+  function flush() { if (id != "") print id "\t" ssh "\t" roots "\t" st; id="" }
+  { line=$0; sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+  line == "" { next }
+  line == "hosts:" { inh=1; next }
+  line ~ /^[^ ]/ { flush(); inh=0; next }
+  !inh { next }
+  line ~ /^  [A-Za-z0-9_.-]+:$/ { flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""; next }
+  line ~ /^    [a-z_]+:/ {
+    key=line; sub(/^    /, "", key); sub(/:.*/, "", key)
+    val=line; sub(/^    [a-z_]+:[[:space:]]*/, "", val)
+    if (key == "ssh") ssh=val; else if (key == "roots") roots=val; else if (key == "status") st=tolower(val)
+    next }
+  { print "hosts.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }
+  END { flush() }' "$HOSTS")
 
-# --- parse projects.yaml -> "name<TAB>host,host" ---
+hosts_tsv=""; declare -A known=()
+while IFS=$'\t' read -r id ssh roots st; do
+  [ -z "$id" ] && continue
+  [ -n "${known[$id]:-}" ] && { echo "hosts.yaml: host '$id' defined twice" >&2; exit 2; }
+  known[$id]=$st
+  if [ "$st" != active ]; then echo "(skipping host '$id': status ${st:-<none>})" >&2; continue; fi
+  if [ -z "$ssh" ] || [ -z "$roots" ]; then echo "hosts.yaml: active host '$id' needs ssh: and roots:" >&2; exit 2; fi
+  hosts_tsv+="$id"$'\t'"$ssh"$'\t'"$roots"$'\n'
+done <<<"$hosts_all"
+for h in "${only[@]}"; do
+  if [ -z "${known[$h]:-}" ]; then echo "unknown host id '$h' (known: ${!known[*]})" >&2; exit 2; fi
+  if [ "${known[$h]}" != active ]; then echo "host '$h' is not active (status: ${known[$h]})" >&2; exit 2; fi
+done
+
+# --- parse projects.yaml -> "name<TAB>host,host" ([*] = every host, [?] = undecided) ---
 proj_tsv=$(awk '
-  /^  [^ #][^:]*:[[:space:]]*\[/ {
-    line=$0; sub(/[[:space:]]+#.*/,"",line)
-    name=line; sub(/^  /,"",name); sub(/:.*/,"",name)
-    hs=line; sub(/^[^\[]*\[/,"",hs); sub(/\].*/,"",hs); gsub(/[[:space:]]/,"",hs)
-    print name "\t" hs }' "$PROJECTS")
+  { line=$0; sub(/[[:space:]]+#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
+  line ~ /^  [^ #][^:]*:[[:space:]]*\[[^]]*\]$/ {
+    name=line; sub(/^  /, "", name); sub(/:.*/, "", name); gsub(/^["\047]|["\047]$/, "", name)
+    hs=line; sub(/^[^\[]*\[/, "", hs); sub(/\].*/, "", hs); gsub(/[[:space:]]/, "", hs)
+    if (name in seen) { print "projects.yaml:" NR ": duplicate entry " name " (first one wins)" > "/dev/stderr"; next }
+    seen[name]=1; print name "\t" hs; next }
+  line ~ /^  [^ #]/ { print "projects.yaml:" NR ": unrecognized line, ignored: " $0 > "/dev/stderr" }' "$PROJECTS")
 
 # --- the per-host scanner (runs under bash on each host; args: fetch size root...) ---
+# Prints one TSV row per entry: root, name, branch, url, size, flags. Last line is `#DONE`: a scan
+# without it was cut short and must not be read as complete.
 read -r -d '' SCAN <<'EOF'
 fetch=$1; size=$2; shift 2
-for root in "$@"; do
-  r="${root/#\~/$HOME}"; [ -d "$r" ] || continue
-  for d in "$r"/*/; do
-    d=${d%/}; n=$(basename "$d"); sz=-
-    [ "$size" = 1 ] && sz=$(du -sh "$d" 2>/dev/null | cut -f1)
-    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)
-    if [ "$top" != "$(realpath "$d")" ]; then
-      printf '%s\t%s\tnogit\t-\t-\t0\t0\t0\t0\t0\t%s\n' "$root" "$n" "$sz"; continue
+set -o pipefail
+shopt -s nullglob dotglob
+export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15'
+REGEN='(^|/)(\.venv|venv|env|__pycache__|node_modules|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.ipynb_checkpoints|\.tox|\.nox|\.cache|[^/]*\.egg-info|\.DS_Store)/?$'
+g() { local d=$1; shift; git --no-optional-locks -C "$d" "$@"; }
+lines() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l; }
+
+# add one worktree's status into dirty/unt/ign (+ ignpaths); 1 on git error
+count_status() {
+  local d=$1 out line p
+  out=$(g "$d" status --porcelain --untracked-files=normal --ignored=matching --ignore-submodules=none) || return 1
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in
+      '?? '*) unt=$((unt+1)) ;;
+      '!! '*) p=${line#!! }; p=${p%/}
+              if [[ ! "$p" =~ $REGEN ]]; then ign=$((ign+1)); ignpaths+=("$d/$p"); fi ;;
+      *) dirty=$((dirty+1)) ;;
+    esac
+  done <<<"$out"
+}
+
+# commits not on any remote-tracking ref: local branches + tags + HEAD
+count_unpushed() {
+  local d=$1 heads=(--branches --tags) n
+  g "$d" rev-parse -q --verify HEAD >/dev/null 2>&1 && heads+=(HEAD)
+  n=$(g "$d" rev-list --count "${heads[@]}" --not --remotes) || return 1
+  unp=$((unp+n))
+}
+
+emit() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
+
+scan_repo() {
+  local root=$1 n=$2 repo=$3
+  local url=- br sz=- err=0 dirty=0 unt=0 ign=0 unp=0 beh=0 st=0 wts=0 nsub=0 fetchfail=0 localrem=0
+  local ignpaths=() flags=() remotes r u wt line s
+  remotes=$(g "$repo" remote) || err=1
+  if [ -n "$remotes" ]; then
+    url=$(g "$repo" remote get-url "$(head -1 <<<"$remotes")" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##') || err=1
+    while IFS= read -r r; do
+      # the URL as configured (not insteadOf-rewritten): that's what says where the backup lives
+      u=$(g "$repo" config --get "remote.$r.url") || { err=1; continue; }
+      case "$u" in
+        *://*) case "$u" in file://*) localrem=1 ;; esac ;;   # https://, ssh://
+        *@*:*) ;;                                            # scp-style user@host:path (GitHub etc.)
+        *) localrem=1 ;;                                     # /path, ../path, or host:path (a fleet box)
+      esac
+    done <<<"$remotes"
+    if [ "$fetch" = 1 ]; then
+      timeout 90 git --no-optional-locks -C "$repo" fetch --all --prune -q </dev/null >/dev/null 2>&1 || fetchfail=1
     fi
-    rem=$(git -C "$d" remote | head -1)
-    url=-; [ -n "$rem" ] && url=$(git -C "$d" remote get-url "$rem" | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
-    [ "$fetch" = 1 ] && [ -n "$rem" ] && GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$d" fetch --all -q 2>/dev/null
-    br=$(git -C "$d" branch --show-current); br=${br:-DETACHED}
-    dirty=$(git -C "$d" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
-    unt=$(git -C "$d" status --porcelain 2>/dev/null | grep -c '^??')
-    unp=0; [ -n "$rem" ] && unp=$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l)
-    beh=$(git -C "$d" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)
-    st=$(git -C "$d" stash list 2>/dev/null | wc -l)
-    printf '%s\t%s\tgit\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$root" "$n" "$url" "$br" "$dirty" "$unt" "$unp" "$beh" "$st" "$sz"
+  fi
+  if br=$(g "$repo" symbolic-ref -q --short HEAD); then :; else
+    if [ $? -eq 1 ]; then br=DETACHED; flags+=(DETACHED); else br=?; err=1; fi
+  fi
+
+  count_status "$repo" || err=1
+  [ -n "$remotes" ] && { count_unpushed "$repo" || err=1; }
+  if g "$repo" rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
+    beh=$(g "$repo" rev-list --count 'HEAD..@{u}') || { beh=0; err=1; }
+  fi
+  s=$(g "$repo" stash list) || err=1; st=$(lines "$s")
+
+  # linked worktrees (first entry of the list is this checkout)
+  wt=$(g "$repo" worktree list --porcelain) || err=1
+  while IFS= read -r line; do
+    case "$line" in worktree\ *) p=${line#worktree }
+      [ "$p" = "$(realpath "$repo")" ] && continue
+      wts=$((wts+1)); [ -d "$p" ] && { count_status "$p" || err=1; } ;;
+    esac
+  done <<<"$wt"
+
+  # submodules, recursively: their own refs/stash/worktree aren't visible from the parent
+  s=$(g "$repo" submodule foreach --quiet --recursive 'echo "$toplevel/$sm_path"' 2>/dev/null) || err=1
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    nsub=$((nsub+1))
+    count_status "$p" || err=1
+    count_unpushed "$p" || err=1
+    u=$(g "$p" stash list) || err=1; st=$((st+$(lines "$u")))
+  done <<<"$s"
+
+  [ -z "$remotes" ] && flags+=(NOREMOTE)
+  [ "$unp" -gt 0 ] && flags+=("UNPUSHED:$unp")
+  [ "$dirty" -gt 0 ] && flags+=("DIRTY:$dirty")
+  [ "$unt" -gt 0 ] && flags+=("UNTRACKED:$unt")
+  [ "$st" -gt 0 ] && flags+=("STASH:$st")
+  [ "$ign" -gt 0 ] && flags+=("IGNORED:$ign")
+  [ "$wts" -gt 0 ] && flags+=("WORKTREES:$wts")
+  [ "$nsub" -gt 0 ] && flags+=("SUBMODULES:$nsub")
+  [ "$localrem" = 1 ] && flags+=(LOCALREMOTE)
+  [ "$fetchfail" = 1 ] && flags+=(FETCHFAIL)
+  [ "$err" = 1 ] && flags+=(ERR)
+  [ "$beh" -gt 0 ] && flags+=("BEHIND:$beh")
+  if [ "$size" = 1 ]; then
+    sz=$(du -sh "$repo" 2>/dev/null | cut -f1)
+    [ ${#ignpaths[@]} -gt 0 ] && flags+=("ignored-size:$(du -sch "${ignpaths[@]}" 2>/dev/null | tail -1 | cut -f1)")
+  fi
+  emit "$root" "$n" "$br" "$url" "$sz" "${flags[*]}"
+}
+
+scan_entry() {   # $1 root as written, $2 display name, $3 abs path
+  local root=$1 n=$2 d=$3 top nested=() sz=- x
+  if [[ "$n" == *$'\t'* || "$n" == *$'\n'* ]]; then n=$(printf '%q' "$n"); badname=" BADNAME"; else badname=""; fi
+  top=$(git --no-optional-locks -C "$d" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$top" ] && [ "$top" = "$(realpath "$d")" ]; then scan_repo "$root" "$n" "$d"; return; fi
+  [ "$size" = 1 ] && sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+  if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then emit "$root" "$n" - - "$sz" "EMPTY$badname"; return; fi
+  # git repos nested inside a non-git dir (kirby/katam): list them and audit each one
+  while IFS= read -r -d '' x; do nested+=("$(dirname "$x")"); done \
+    < <(find "$d" -mindepth 2 -maxdepth 4 -name .git -print0 -prune 2>/dev/null)
+  if [ ${#nested[@]} -gt 0 ]; then
+    emit "$root" "$n" - - "$sz" "NOGIT NESTED:${#nested[@]}$badname"
+    for x in "${nested[@]}"; do scan_repo "$root" "$n/${x#"$d"/}" "$x"; done
+  else
+    emit "$root" "$n" - - "$sz" "NOGIT$badname"
+  fi
+}
+
+for root in "$@"; do
+  r="${root/#\~/$HOME}"; r="${r%/}"
+  if [ ! -d "$r" ]; then emit "$root" "(root)" - - - ROOT-MISSING; continue; fi
+  loose=0
+  for e in "$r"/*; do
+    if [ -L "$e" ] || [ ! -d "$e" ]; then loose=$((loose+1)); continue; fi
+    scan_entry "$root" "$(basename "$e")" "$e"
   done
+  [ "$loose" -gt 0 ] && emit "$root" "(loose files)" - - - "LOOSE:$loose"
 done
+echo '#DONE'
 EOF
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmo=600; [ "$fetch" = 1 ] && tmo=1800; tmo=${FLEET_AUDIT_TIMEOUT:-$tmo}   # per-host scan timeout (s)
+ran=()
 while IFS=$'\t' read -r id ssh roots; do
   [ -z "$id" ] && continue
   if [ ${#only[@]} -gt 0 ] && [[ ! " ${only[*]} " =~ " $id " ]]; then continue; fi
+  ran+=("$id")
   (
     # shellcheck disable=SC2086
     if [ "$ssh" = local ]; then
-      bash -c "$SCAN" scan "$fetch" "$size" $roots
+      timeout "$tmo" bash -c "$SCAN" scan "$fetch" "$size" $roots
     else
       # login shell may be fish -> always hand the script to bash explicitly; single-quote the
       # roots so the remote shell doesn't expand `~` (the scanner does, and reports them as written)
       qroots=$(for r in $roots; do printf "'%s' " "$r"; done)
-      timeout 600 ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh" bash -s -- "$fetch" "$size" "$qroots" <<<"$SCAN"
-    fi > "$tmp/$id.tsv" 2> "$tmp/$id.err" || echo "$?" > "$tmp/$id.fail"
+      timeout "$tmo" ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh" bash -s -- "$fetch" "$size" "$qroots" <<<"$SCAN"
+    fi > "$tmp/$id.tsv" 2> "$tmp/$id.err"
+    echo "$?" > "$tmp/$id.rc"
   ) &
 done <<<"$hosts_tsv"
 wait
 
-printf '%-38s %-7s %-10s %-24s %-6s %s\n' DIR HOST ROOT BRANCH SIZE FLAGS
-for f in "$tmp"/*.tsv; do
-  [ -e "$f" ] || continue
-  id=$(basename "$f" .tsv)
-  if [ -e "$tmp/$id.fail" ]; then
-    echo "!! $id: scan failed (exit $(cat "$tmp/$id.fail")) — unreachable or auth problem: $(head -c 200 "$tmp/$id.err")" >&2
-  fi
-  while IFS=$'\t' read -r root n kind url br dirty unt unp beh st sz; do
-    flags=()
-    [ "$kind" = nogit ] && flags+=(NOGIT)
-    [ "$kind" = git ] && [ "$url" = - ] && flags+=(NOREMOTE)
-    [ "$unp" -gt 0 ] && flags+=("UNPUSHED:$unp")
-    [ "$dirty" -gt 0 ] && flags+=("DIRTY:$dirty")
-    [ "$unt" -gt 0 ] && flags+=("UNTRACKED:$unt")
-    [ "$st" -gt 0 ] && flags+=("STASH:$st")
-    [ "$beh" -gt 0 ] && flags+=("BEHIND:$beh")
-    want=$(awk -F'\t' -v n="$n" '$1==n {print $2}' <<<"$proj_tsv")
-    if [ -z "$want" ]; then flags+=(UNLISTED)
+failed=0
+printf '%-40s %-7s %-11s %-24s %-6s %s\n' DIR HOST ROOT BRANCH SIZE FLAGS
+for id in "${ran[@]}"; do
+  grep -v '^#DONE$' "$tmp/$id.tsv" | while IFS=$'\t' read -r root n br url sz fl; do
+    flags=($fl)
+    top=${n%%/*}
+    want=$(awk -F'\t' -v n="$top" '$1==n {print $2}' <<<"$proj_tsv")
+    if [[ "$n" == "(root)" || "$n" == "(loose files)" ]]; then :
+    elif [ -z "$want" ]; then flags+=(UNLISTED)
     elif [ "$want" = "?" ]; then flags+=(UNDECIDED)
-    elif [[ ! ",$want," == *",$id,"* ]]; then flags+=("MISPLACED(owner:$want)")
+    elif [ "$want" != "*" ] && [[ ! ",$want," == *",$id,"* ]]; then flags+=("MISPLACED(owner:$want)")
     fi
-    [ "$root" = "~/code" ] && flags+=(LEGACY)
+    [ "${root%/}" = "~/code" ] && flags+=(LEGACY)
     [ ${#flags[@]} -eq 0 ] && [ "$show_all" = 0 ] && continue
-    printf '%-38s %-7s %-10s %-24s %-6s %s\n' "${n:0:38}" "$id" "$root" "${br:0:24}" "$sz" "${flags[*]:-ok}"
-  done < "$f"
+    printf '%-40s %-7s %-11s %-24s %-6s %s\n' "$n" "$id" "$root" "${br:0:24}" "$sz" "${flags[*]:-ok}"
+  done
 done | sort -k1,1 -k2,2
 
-# projects registered for a host but not found there
-while IFS=$'\t' read -r n want; do
-  [ "$want" = "?" ] && continue
-  IFS=, read -ra hs <<<"$want"
-  for h in "${hs[@]}"; do
-    [ -e "$tmp/$h.tsv" ] || continue
-    awk -F'\t' -v n="$n" '$2==n {f=1} END {exit !f}' "$tmp/$h.tsv" || echo "-- $n: registered for $h but not found there"
-  done
-done <<<"$proj_tsv"
+echo
+for id in "${ran[@]}"; do
+  rc=$(cat "$tmp/$id.rc" 2>/dev/null || echo '?'); n=$(grep -vc '^#DONE$' "$tmp/$id.tsv")
+  if [ "$rc" = 0 ] && [ "$(tail -1 "$tmp/$id.tsv")" = '#DONE' ]; then
+    echo "== $id: audited ($n entries)"
+    # projects registered for this host but not found (only meaningful after a complete scan)
+    while IFS=$'\t' read -r p want; do
+      case "$want" in '?'|'') continue ;; '*') ;; *) [[ ",$want," == *",$id,"* ]] || continue ;; esac
+      awk -F'\t' -v p="$p" '$2==p {f=1} END {exit !f}' "$tmp/$id.tsv" || echo "   -- $p: registered for $id but not found there"
+    done <<<"$proj_tsv"
+  else
+    failed=1
+    why="exit $rc"; [ "$rc" = 124 ] && why="timed out after ${tmo}s"; [ "$rc" = 255 ] && why="ssh failed"
+    if [ "$n" -gt 0 ]; then
+      echo "!! $id: INCOMPLETE ($why) after $n entries. Entries not shown above were NOT checked, not clean"
+    else
+      echo "!! $id: NOT AUDITED ($why): $(tr '\n' ' ' < "$tmp/$id.err" | head -c 200)"
+    fi
+  fi
+done
+[ "$fetch" = 0 ] && echo "note: no --fetch, so UNPUSHED/BEHIND use cached remote refs. Run with --fetch before deleting anything."
+exit "$failed"
