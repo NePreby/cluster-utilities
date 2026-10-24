@@ -24,8 +24,22 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
 
 ## A. On the new machine (agent running there, or the owner by hand)
 
-1. Get the repo (`gh` is logged in):
+1. Get the repo over SSH (`gh` is logged in). An agent can't answer SSH's "trust this host key?" prompt
+   (it fails with `ssh_askpass … Host key verification failed`), so first add GitHub's host keys from
+   `gh api meta`, which goes over authenticated HTTPS:
    ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   gh api meta --jq '.ssh_keys[]' | sed 's/^/github.com /' > /tmp/gh_keys
+   ssh-keygen -lf /tmp/gh_keys    # ED25519 must be SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+   cat /tmp/gh_keys >> ~/.ssh/known_hosts && rm /tmp/gh_keys
+   ssh -T -o BatchMode=yes git@github.com    # "Hi yjmantilla! You've successfully authenticated…"
+   ```
+   If that last command says `Permission denied (publickey)`, this machine has no key on GitHub yet:
+   `ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 && gh ssh-key add ~/.ssh/id_ed25519.pub -t <name>`.
+   If `gh` lacks the scope, the **owner** runs `gh auth refresh -s admin:public_key` (browser step) first.
+   Then make SSH the default for `gh` and clone:
+   ```bash
+   gh config set git_protocol ssh
    gh repo clone yjmantilla/cluster-utilities ~/Projects/cluster-utilities
    ```
 2. **Owner, in a normal terminal on that machine** (needs sudo and a browser click):
@@ -90,6 +104,7 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
 ## If something goes wrong
 | Symptom | What to do |
 |---|---|
+| Clone fails: `ssh_askpass` / "Host key verification failed" | github.com isn't in known_hosts. Do the host-key part of A1 |
 | "Refusing over SSH" | It's being run over ssh. Run it at the machine's keyboard |
 | "reboot, then rerun" | A kernel upgrade means tun can't load until reboot. Reboot, run the same command |
 | "DNS broke after the switch: restoring …" | The script already put the old resolv.conf back and exited 1. Report the output; don't retry blindly |
