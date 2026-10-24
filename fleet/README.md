@@ -30,15 +30,14 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
      - `IGNORED:n` (usually the data): copy and verify it as in "Moving gitignored data" below.
        Git can't vouch for it.
      - `LFS:n`: **keep the copy, or archive the whole repo directory first** with the recipe below,
-       but only if the row has **no `LFS-EXTERNAL`**. That flag means the LFS store lives outside the
-       repo directory (an absolute `lfs.storage`, a symlinked `objects` dir, or a linked worktree using
-       the main repo's store, or symlinked shards/objects inside the store), so the archive wouldn't
-       contain it: keep the copy. Or also archive the store itself with the same recipe (`cd` to its
-       parent, archive the store dir). The objects then have their own verified copy, which you note
-       down next to the repo's archive. A successful
-       `git lfs push --all` is NOT enough either: `lfs.url` can send the upload somewhere other than the
-       forge, and it skips LFS objects no commit points to (e.g. a file staged and then reset). Both
-       still exit 0. Don't empty the store to make the flag go away.
+       but only if the row has **no `LFS-EXTERNAL`**.
+     - `LFS-EXTERNAL`: **keep the copy.** The LFS store, or part of it, lives outside the repo directory
+       (an absolute `lfs.storage`, a symlinked `objects` dir or shards/objects inside it, or a linked
+       worktree using the main repo's store), so an archive of the repo wouldn't contain it. Archiving the
+       store separately doesn't help either: tar stores symlinks as links, and the checks still pass.
+     - For either flag, a successful `git lfs push --all` is NOT enough: `lfs.url` can send the upload
+       somewhere other than the forge, and it skips LFS objects no commit points to (e.g. a file staged
+       and then reset). Both still exit 0. Don't empty the store to make a flag go away.
      - `HIDDENIDX:n`: `git ls-files -v | grep -E '^([a-z]|S) '` lists the files. Clear the bit
        (`git update-index --no-assume-unchanged / --no-skip-worktree <f>`) and commit any real edit.
      - `REPLACE:n`: `git replace -l` lists the replaced objects. If a replacement holds content you
@@ -72,17 +71,22 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    printf 'host=%s\nsource=%s\n' "$(hostname)" "$PWD/<repo>" > "$d/SOURCE"
    tar -czf "$d/<repo>.tar.gz" <repo> && tar -dzf "$d/<repo>.tar.gz" \
      && (cd "$d" && sha256sum <repo>.tar.gz > SHA256SUMS) && echo "VERIFIED: $d"
-   # copy that directory to ANOTHER machine. Refuse if the name already exists there (the random suffix
-   # is only unique on THIS machine), then check the bytes that arrived against THIS machine's hash.
-   # A copied SHA256SUMS would only prove the remote is consistent with itself.
-   b=$(basename "$d"); h=$(cut -d' ' -f1 "$d/SHA256SUMS")
-   ssh <other-host> "mkdir -p archives && test ! -e archives/$b" \
-     && rsync -a "$d" <other-host>:archives/ \
+   # copy that directory to ANOTHER machine:
+   #  - only if the step above produced a real hash (otherwise two empty strings would "match")
+   #  - reserve the name there with a plain mkdir, which fails if it already exists (the random suffix
+   #    is only unique on THIS machine), so nothing there is ever overwritten
+   #  - check the bytes that arrived against THIS machine's hash, not a copied SHA256SUMS
+   b=$(basename "$d"); h=$(cut -d' ' -f1 "$d/SHA256SUMS" 2>/dev/null)
+   [[ "$h" =~ ^[0-9a-f]{64}$ ]] \
+     && ssh <other-host> "mkdir -p archives && mkdir archives/$b" \
+     && rsync -a "$d/" "<other-host>:archives/$b/" \
      && [ "$(ssh <other-host> "sha256sum archives/$b/<repo>.tar.gz" | cut -d' ' -f1)" = "$h" ] \
      && echo "COPY OK: <other-host>:archives/$b" || echo "!! copy NOT verified: don't delete"
    ```
    `tar -d` compares the archive with the files on disk. Delete the repo only after **both**
-   `VERIFIED` and `COPY OK`. (The remote commands also work when the other host's shell is fish.)
+   `VERIFIED` and `COPY OK`. The quoted remote commands also run under fish (`&&` needs fish 3+, which
+   CachyOS has). If the copy step fails after the remote `mkdir` succeeded (e.g. rsync was
+   interrupted), check `archives/<that dir>` on the other host, remove it, and run the copy step again.
    `git bundle --all` is **not** a full copy: it leaves out reflog-only commits and anything outside git
    objects (LFS, annex).
 

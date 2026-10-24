@@ -300,9 +300,11 @@ count_lfs() {
   absent "$st/objects" && return 0
   [ -e "$st/objects" ] || return 1
   local tf frc links; tf=$(tmpf)
-  # -L: count what git-lfs can actually read, through symlinked shard dirs or objects too. A dangling
-  # or looping link makes find fail -> ERR.
-  find -L "$st/objects" -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
+  # -L: count what git-lfs can actually read, through symlinked shard dirs or objects too. A looping link
+  # makes find fail -> ERR; a dangling one isn't counted but is caught by the symlink check below
+  # (LFS-EXTERNAL). -maxdepth 4: the layout is aa/bb/<oid>, so a link out of the store can't send the
+  # count wandering through some huge tree.
+  find -L "$st/objects" -maxdepth 4 -type f -printf . >"$tf" 2>/dev/null; frc=$?   # one byte per object
   n=$(wc -c <"$tf"); rm -f "$tf"
   [ "$frc" = 0 ] || return 1
   # any symlink INSIDE the store (a shard dir or object moved to another disk): tar archives the link,
