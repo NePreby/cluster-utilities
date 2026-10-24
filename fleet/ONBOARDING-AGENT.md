@@ -42,6 +42,12 @@ SSH session menu (plain fish / tmux / herdr). Background and the full procedure:
    gh config set git_protocol ssh
    gh repo clone yjmantilla/cluster-utilities ~/Projects/cluster-utilities
    ```
+   **Keep Claude Code transcripts.** By default Claude Code deletes chat transcripts older than 30 days
+   (`~/.claude/projects/`); we keep them. Merge `"cleanupPeriodDays": 36500` into `~/.claude/settings.json`
+   without dropping existing keys. Don't use `0`: it isn't a "never delete" value.
+   ```bash
+   python3 -c 'import json,os;p=os.path.expanduser("~/.claude/settings.json");d=json.load(open(p)) if os.path.exists(p) else {};d["cleanupPeriodDays"]=36500;os.makedirs(os.path.dirname(p),exist_ok=True);open(p,"w").write(json.dumps(d,indent=2)+"\n")'
+   ```
 2. **Owner, in a normal terminal on that machine** (needs sudo and a browser click):
    ```bash
    bash ~/Projects/cluster-utilities/bin/fleet-onboard              # keep the current hostname
