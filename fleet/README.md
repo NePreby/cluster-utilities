@@ -250,8 +250,9 @@ ntfs-chkdsk disk.img            # also works on a whole-disk image, e.g. from dd
 - It needs **VT-x on in the BIOS** (`/dev/kvm`). Without it, QEMU emulates the CPU and boots very
   slowly. All seven lab machines have it on since 2026-10-25 (HP Z230/Z240: F10 → Security → System
   Security → Virtualization Technology (VTx). Power off fully after saving, or it doesn't take effect).
-- Disks formatted with Linux `mkntfs` always fail the scan at first: chkdsk resizes `mkntfs`'s
-  journal ("adjusting the size of the log file"). One `--fix` clears it; it isn't corruption.
+- Small volumes (a few hundred MB) made with Linux `mkntfs` fail the scan with "adjusting the size of
+  the log file": chkdsk wants a bigger journal than `mkntfs` gave them. One `--fix` clears it; it
+  isn't corruption. Full-size disks formatted with `mkntfs` (easystore, 1 TB) scan clean.
 - Exit status is chkdsk's worst code (0 clean, 1 fixed, 3 problems found or couldn't check), or 4 if
   the VM gave no result.
 

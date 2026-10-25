@@ -138,9 +138,11 @@ if lsblk -nro NAME "$dev" | while read -r p; do grep -q "^/dev/$p " /proc/swaps 
 fi
 lsblk -nro FSTYPE "$dev" | grep -qx ntfs || { echo "$dev has no NTFS partition, nothing for chkdsk to do" >&2; exit 2; }
 # a stable path for the run, in case the sdX letter changes
-byid=$(find /dev/disk/by-id -maxdepth 1 \( -name 'usb-*' -o -name 'ata-*' -o -name 'nvme-*' -o -name 'scsi-*' \) \
-  ! -name '*-part*' -exec sh -c '[ "$(readlink -f "$1")" = "$2" ] && echo "$1"' _ {} "$dev" \; | head -1)
-byid=${byid:-$dev}
+byid=$dev
+for l in /dev/disk/by-id/usb-* /dev/disk/by-id/ata-* /dev/disk/by-id/nvme-* /dev/disk/by-id/scsi-*; do
+  case $l in *-part*) continue ;; esac
+  if [ -e "$l" ] && [ "$(readlink -f "$l")" = "$dev" ]; then byid=$l; break; fi
+done
 model=$(lsblk -dno MODEL "$dev" | xargs); serial=$(lsblk -dno SERIAL "$dev" | xargs)
 fi
 
