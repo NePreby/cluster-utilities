@@ -256,6 +256,23 @@ ntfs-chkdsk disk.img            # also works on a whole-disk image, e.g. from dd
 - Exit status is chkdsk's worst code (0 clean, 1 fixed, 3 problems found or couldn't check), or 4 if
   the VM gave no result.
 
+## Network logger (wired drops, #10)
+
+`bin/netlog` writes one line a minute to `~/.local/state/netlog/YYYY-MM.tsv`: ethernet address,
+carrier, speed, the switch's pause-frame advert, an HTTP check bound to `eno1`, the Wi-Fi address,
+and which device actually carries internet traffic. Running on lkj004 and lkj006. To install it on
+another box (user unit, no sudo):
+```bash
+install -Dm755 bin/netlog ~/.local/bin/netlog
+install -Dm644 -t ~/.config/systemd/user fleet/systemd/netlog.{service,timer}
+systemctl --user daemon-reload && systemctl --user enable --now netlog.timer
+loginctl enable-linger "$USER"   # keep it running while logged out and across reboots
+netlog --changes                 # only the minutes where something changed
+```
+To probe the wired side while Wi-Fi is up, give the ethernet a higher route metric than Wi-Fi (600),
+so a dead wired network can't take the default route: `nmcli con modify "<wired con>"
+ipv4.route-metric 700 ipv6.route-metric 700`. Set them back to `-1` once the wired network is fixed.
+
 ## Auth notes
 
 - **Keys + password both work** on the lab boxes. Password login was kept on purpose
