@@ -25,7 +25,7 @@ hosts:
     ssh: lab3
     tailscale: lkj003-psy
     ip: 100.103.1.57
-    role: research
+    role: research — speech-representations (P2000 GPU; keep it for GPU work)
     spec: Xeon E3-1241 v3 (8 threads), 32 GB RAM, Quadro P2000, 924 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects
@@ -61,7 +61,7 @@ hosts:
     ssh: lab8
     tailscale: lkj008-psy
     ip: 100.86.65.72
-    role: research — default home for research repos + their data (also `lab` alias)
+    role: research — containerized-red-teaming home, plus papers/pkb/small repos; /mnt/Datas4To backup disk (also `lab` alias)
     spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects ~/code
@@ -70,7 +70,7 @@ hosts:
     ssh: lab9
     tailscale: lkj009-psy
     ip: 100.112.76.58
-    role: research
+    role: research — epilepsy (data to the 4 TB HDD), eeg-analysis-adhd-epilepsy + neuro-cocodelics (data on fir)
     spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS; login shell bash (no SSH menu)
     auth: key+password
     roots: ~/Projects
@@ -79,7 +79,7 @@ hosts:
     ssh: lab10
     tailscale: lkj010-psy
     ip: 100.127.148.40
-    role: research
+    role: personal use + fleet management (the box that manages the other nodes); internal 4 TB `Data` disk holds personal backups
     spec: Xeon E3-1245 v5 (8 threads), 32 GB RAM, Quadro P2000, 434 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects

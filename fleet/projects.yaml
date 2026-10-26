@@ -28,7 +28,9 @@ projects:
   os-debugs: [laptop, lab8]
 
   # --- lab: research ---
-  epilepsy: [lab8]                   # data on lab8 since 2026-10-24, checksum-verified (paths: epilepsy README); laptop checkout is code-only
+  epilepsy: [lab9, lab8]             # TEMP: moving lab8 -> lab9 (decided 2026-10-25; yjmantilla/epilepsy#2). Drop lab8 once the lab9 copy is checksum-verified. Laptop checkout deleted 2026-10-25
+  eeg-analysis-adhd-epilepsy: [lab9] # code only (BabaSanfour/eeg-analysis-adhd-epilepsy); data on fir /project/6114380/shared/eeg-adhdh-epilepsy
+  neuro-cocodelics: [lab9]           # code only (thecocolab/neuro-cocodelics); data on fir /project/6114380/shared/neuro-cocodelics + /scratch/yorguin/cocodelics_*
   speech-representations: [lab3]     # moved from lab8 2026-10-25; lab8 copy deleted after verification
   containerized-red-teaming: [lab8]
   crt-pr130: [lab8]
