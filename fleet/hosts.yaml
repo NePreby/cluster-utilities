@@ -80,7 +80,7 @@ hosts:
     ssh: lab10
     tailscale: lkj010-psy
     ip: 100.127.148.40
-    role: personal use + fleet management (the box that manages the other nodes); pkb (since 2026-10-26); internal 4 TB `Data` disk holds personal backups
+    role: personal use + fleet management (the box that manages the other nodes); pkb (since 2026-10-26); kirby co-op servers ~/kirby-private (since 2026-10-26, from lab8); internal 4 TB `Data` disk holds personal backups
     spec: Xeon E3-1245 v5 (8 threads), 32 GB RAM, Quadro P2000, 434 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects

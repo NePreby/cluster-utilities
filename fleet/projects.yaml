@@ -23,7 +23,7 @@ projects:
 
   # --- laptop: desktop, personal, needs a display/GPU ---
   linux-config: [laptop]
-  kirby: [laptop]  # dev on the laptop (katam = private yjmantilla/kirby-online; personal-files branch in git-annex). The co-op server runs on lab8 from ~/kirby-private/coop2 (not a repo; saves snapshotted into personal-files 2026-10-26)
+  kirby: [laptop]  # dev on the laptop (katam = private yjmantilla/kirby-online; personal-files branch in git-annex). The co-op servers (coop/coop2.yorguin.foo: systemd user units coop{,2}-relay + coop{,2}-tunnel) run on lab10 from ~/kirby-private (not a repo; moved from lab8 2026-10-26; saves snapshotted into personal-files). Deploy with LAB=lab10 / --lab lab10 (the laptop's `lab` alias is lab8)
   genome-pgs: [laptop]
   study-permit: [laptop]
   os-debugs: [laptop, lab8]
