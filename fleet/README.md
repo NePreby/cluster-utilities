@@ -232,6 +232,30 @@ and comments are stripped first), a host id at column 0, a stray top-level key, 
 root that doesn't start with `/` or `~`. Roots are space-separated, so a path with spaces isn't
 supported. In `projects.yaml` it's a warning.
 
+## Checking NTFS disks (chkdsk without Windows)
+
+Linux can't repair NTFS (`ntfsfix` only clears the dirty flag). `bin/ntfs-chkdsk` runs the real
+Windows `chkdsk` instead: it boots WinPE from Microsoft's Windows 11 evaluation ISO in QEMU with the
+disk passed through, checks every NTFS volume on it, powers off and prints the logs (#20).
+```bash
+sudo pacman -S --needed qemu-desktop wimlib libisoburn mtools dosfstools acl socat
+ntfs-chkdsk /dev/sdX            # scan; read-only by construction (snapshot=on overlay)
+ntfs-chkdsk --dry-fix /dev/sdX  # what chkdsk /f WOULD change, disk untouched
+ntfs-chkdsk --fix /dev/sdX      # repair for real (asks you to type FIX)
+ntfs-chkdsk disk.img            # also works on a whole-disk image, e.g. from ddrescue
+```
+- The first run downloads the 5.4 GB ISO and builds `~/.cache/ntfs-chkdsk/winpe.iso` (~0.5 GB). Copy
+  that file to another machine's cache to skip the download there. After that, a run takes under a
+  minute plus chkdsk's own time.
+- It needs **VT-x on in the BIOS** (`/dev/kvm`). Without it, QEMU emulates the CPU and boots very
+  slowly. All seven lab machines have it on since 2026-10-25 (HP Z230/Z240: F10 → Security → System
+  Security → Virtualization Technology (VTx). Power off fully after saving, or it doesn't take effect).
+- Small volumes (a few hundred MB) made with Linux `mkntfs` fail the scan with "adjusting the size of
+  the log file": chkdsk wants a bigger journal than `mkntfs` gave them. One `--fix` clears it; it
+  isn't corruption. Full-size disks formatted with `mkntfs` (easystore, 1 TB) scan clean.
+- Exit status is chkdsk's worst code (0 clean, 1 fixed, 3 problems found or couldn't check), or 4 if
+  the VM gave no result.
+
 ## Auth notes
 
 - **Keys + password both work** on the lab boxes. Password login was kept on purpose

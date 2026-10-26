@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Run the real Windows chkdsk on an NTFS disk from Linux: boots a cached WinPE (from Microsoft's
+# Windows 11 evaluation ISO) in QEMU with the disk passed through, runs chkdsk on every NTFS
+# volume of that disk, powers off, and prints the logs. No Windows install, no reboot. (#20)
+#
+#   ntfs-chkdsk /dev/sdX               # scan only: chkdsk without /f. Read-only by construction:
+#                                      #   the disk is attached with snapshot=on, every write Windows
+#                                      #   makes goes to a throwaway overlay
+#   ntfs-chkdsk --dry-fix /dev/sdX     # chkdsk /f against the throwaway overlay: shows what a repair
+#                                      #   WOULD do, disk untouched
+#   ntfs-chkdsk --fix /dev/sdX         # chkdsk /f /x for real (asks first)
+#   ntfs-chkdsk --fix --bad-sectors …  # chkdsk /r /x: also scans the surface, hours per TB
+#   ntfs-chkdsk --show …               # show the VM window (to watch progress or debug)
+#   ntfs-chkdsk --build [--iso FILE]   # only build the WinPE image (also done on first use)
+#
+# The disk must be a whole disk (/dev/sdX or /dev/disk/by-id/…) with no partition mounted.
+# One sudo prompt: it grants you rw on that one device node for the run (setfacl) and revokes it
+# afterwards; QEMU itself runs as you. KVM is used when /dev/kvm is usable (VT-x on in the BIOS),
+# otherwise it falls back to emulation, which boots in minutes instead of seconds.
+#
+# Cache: ~/.cache/ntfs-chkdsk/ — winpe.iso (~0.6 GB, built once; copy it to other machines to skip
+# the 5.4 GB download) and runs/<time>-<model>-<serial>/ with each run's logs.
+# Needs: qemu-desktop wimlib libisoburn mtools dosfstools acl socat
+#   sudo pacman -S --needed qemu-desktop wimlib libisoburn mtools dosfstools acl socat
+#
+# Exit: chkdsk's worst exit code over the disk's volumes (0 clean; 1 errors fixed; 2 cleanup done or
+# needed; 3 errors found and not fixed, which is what a scan reports, or couldn't check), 4 the VM
+# run failed (no result came back), 2 also for usage errors before anything ran.
+set -euo pipefail
+
+case " $* " in *" -h "*|*" --help "*) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;; esac
+
+ISO_URL='https://go.microsoft.com/fwlink/?linkid=2289031&clcid=0x409&culture=en-us&country=us'  # Win 11 Ent. eval, x64 en-US
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/ntfs-chkdsk
+pe_iso=$cache/winpe.iso
+
+mode=scan; show=0; build_only=0; iso=""; disk=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fix) [ "$mode" = scan ] && mode=fix ;;
+    --dry-fix) mode=dryfix ;;
+    --bad-sectors) badsec=1 ;;
+    --show) show=1 ;;
+    --build) build_only=1 ;;
+    --iso) iso=${2:?--iso needs a file}; shift ;;
+    -*) echo "unknown flag $1 (see --help)" >&2; exit 2 ;;
+    *) disk=$1 ;;
+  esac
+  shift
+done
+badsec=${badsec:-0}
+
+need() {
+  local miss=() c
+  for c in "$@"; do type -P "$c" >/dev/null || miss+=("$c"); done
+  [ ${#miss[@]} = 0 ] && return
+  echo "missing: ${miss[*]}" >&2
+  echo "  sudo pacman -S --needed qemu-desktop wimlib libisoburn mtools dosfstools acl socat" >&2
+  exit 2
+}
+
+# ---------------------------------------------------------------- WinPE image (built once)
+# startnet.cmd is WinPE's boot script. It stays generic: it looks for NTFSCHK\RUN.CMD on any drive
+# (the small log disk this script attaches), runs it, and powers off. All per-run logic is in RUN.CMD.
+build_image() {
+  need udisksctl wimlib-imagex xorriso curl
+  mkdir -p "$cache"
+  if [ -z "$iso" ]; then
+    iso=$cache/win11-eval.iso
+    if [ ! -s "$iso" ]; then
+      echo "== downloading the Windows 11 evaluation ISO from Microsoft (5.4 GB, once; resumable)"
+      curl -fL -C - --retry 5 -o "$iso.part" "$ISO_URL"
+      mv "$iso.part" "$iso"
+    fi
+  fi
+  rm -rf "$cache"/build.*
+  local w; w=$(mktemp -d "$cache/build.XXXXXX")
+  echo "== extracting boot files + boot.wim from $(basename "$iso")"
+  # Windows ISOs keep their files in UDF; the ISO9660 layer bsdtar/xorriso read is only a README stub.
+  # udisks loop-mounts it without root (polkit allows it for a local session).
+  local loop m
+  loop=$(udisksctl loop-setup -r -f "$iso" | grep -o '/dev/loop[0-9]*')
+  sleep 1
+  m=$(findmnt -no TARGET "$loop" || true)
+  [ -n "$m" ] || m=$(udisksctl mount -b "$loop" -o ro | sed -n 's/^Mounted .* at //p')
+  mkdir -p "$w/iso/boot" "$w/iso/sources"
+  cp -r "$m/bootmgr" "$w/iso/"
+  cp -r "$m/boot/etfsboot.com" "$m/boot/bcd" "$m/boot/boot.sdi" "$m/boot/fonts" "$w/iso/boot/"
+  cp "$m/sources/boot.wim" "$w/iso/sources/"
+  chmod -R u+w "$w/iso"
+  udisksctl unmount -b "$loop" >/dev/null; udisksctl loop-delete -b "$loop"
+  # boot.wim image 1 is plain WinPE (image 2 is Windows Setup). Keep only image 1.
+  wimlib-imagex export "$w/iso/sources/boot.wim" 1 "$w/pe.wim" --boot >/dev/null
+  local f
+  for f in chkdsk.exe fsutil.exe find.exe; do
+    wimlib-imagex dir "$w/pe.wim" 1 --path="/Windows/System32/$f" >/dev/null 2>&1 \
+      || { echo "WinPE in this ISO has no $f; can't continue" >&2; return 1; }
+  done
+  printf '%s\r\n' '@echo off' 'wpeinit' \
+    'for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do if exist %%d:\NTFSCHK\RUN.CMD call %%d:\NTFSCHK\RUN.CMD %%d:' \
+    'wpeutil shutdown' > "$w/startnet.cmd"
+  wimlib-imagex update "$w/pe.wim" 1 --command="add '$w/startnet.cmd' /Windows/System32/startnet.cmd" >/dev/null
+  mv "$w/pe.wim" "$w/iso/sources/boot.wim"
+  echo "== building $pe_iso"
+  # -N -d: plain ISO9660 names (no ";1", no trailing "."); etfsboot looks up "BOOTMGR" literally
+  xorriso -as mkisofs -quiet -iso-level 3 -N -d -J -joliet-long -V NTFSCHK_PE \
+    -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 -hide boot.catalog \
+    -o "$pe_iso.tmp" "$w/iso"
+  mv "$pe_iso.tmp" "$pe_iso"
+  rm -rf "$w"
+  echo "   $(du -h "$pe_iso" | cut -f1)  $pe_iso"
+  if [ "$iso" = "$cache/win11-eval.iso" ]; then echo "   (the 5.4 GB source ISO is no longer needed: rm $iso)"; fi
+}
+
+if [ "$build_only" = 1 ] || [ ! -s "$pe_iso" ]; then
+  build_image
+  [ "$build_only" = 1 ] && exit 0
+fi
+[ -n "$disk" ] || { echo "which disk? (see --help)" >&2; exit 2; }
+need qemu-system-x86_64 mkfs.fat mcopy mtype sfdisk setfacl socat iconv lsblk
+
+# ---------------------------------------------------------------- pick and check the disk
+dev=$(readlink -f "$disk")
+if [ -f "$dev" ]; then
+  # a whole-disk image file (e.g. from ddrescue): no device checks, no sudo
+  img=1; byid=$dev; model=image; serial=$(basename "$dev")
+else
+  img=0
+  [ -b "$dev" ] && [ "$(lsblk -dno TYPE "$dev")" = disk ] || { echo "$disk is not a whole disk or disk image (want /dev/sdX, not a partition)" >&2; exit 2; }
+fi
+if [ "$img" = 0 ]; then
+if lsblk -no MOUNTPOINTS "$dev" | grep -q .; then
+  echo "$dev has mounted partitions; unmount them first:" >&2
+  lsblk -o NAME,FSTYPE,LABEL,MOUNTPOINTS "$dev" >&2; exit 2
+fi
+if lsblk -nro NAME "$dev" | while read -r p; do grep -q "^/dev/$p " /proc/swaps && echo x; done | grep -q x; then
+  echo "$dev holds active swap; refusing" >&2; exit 2
+fi
+lsblk -nro FSTYPE "$dev" | grep -qx ntfs || { echo "$dev has no NTFS partition, nothing for chkdsk to do" >&2; exit 2; }
+# a stable path for the run, in case the sdX letter changes
+byid=$dev
+for l in /dev/disk/by-id/usb-* /dev/disk/by-id/ata-* /dev/disk/by-id/nvme-* /dev/disk/by-id/scsi-*; do
+  case $l in *-part*) continue ;; esac
+  if [ -e "$l" ] && [ "$(readlink -f "$l")" = "$dev" ]; then byid=$l; break; fi
+done
+model=$(lsblk -dno MODEL "$dev" | xargs); serial=$(lsblk -dno SERIAL "$dev" | xargs)
+fi
+
+case $mode in
+  scan)   args="";        what="scan only (chkdsk), disk attached read-only via a throwaway overlay" ;;
+  dryfix) args="/f /x";   what="REPAIR PREVIEW (chkdsk /f) against a throwaway overlay, disk untouched" ;;
+  fix)    args="/f /x";   what="REPAIR (chkdsk /f) — WRITES TO THE DISK" ;;
+esac
+if [ "$badsec" = 1 ]; then args="/r /x"; what="$what + bad-sector scan (/r, hours per TB)"; fi
+[ "$mode" = scan ] && [ "$badsec" = 1 ] && { echo "--bad-sectors needs --fix or --dry-fix (/r implies /f)" >&2; exit 2; }
+
+if [ "$img" = 1 ]; then
+  echo "== image $dev  ($(du -h --apparent-size "$dev" | cut -f1))"
+  sfdisk -l "$dev" 2>/dev/null | sed -n '/^Device/,$p' | sed 's/^/   /'
+else
+  echo "== $dev  ($byid)"
+  echo "   $(lsblk -dno SIZE "$dev" | xargs)  $model  serial $serial"
+  lsblk -o NAME,SIZE,FSTYPE,LABEL "$dev" | sed 's/^/   /'
+fi
+echo "   mode: $what"
+if [ "$mode" = fix ]; then
+  echo "   chkdsk /f can delete index entries and orphaned files. Have a verified backup first."
+  read -rp "   Type FIX to run it: " a; [ "$a" = FIX ] || { echo "cancelled"; exit 2; }
+fi
+
+if [ -w /dev/kvm ]; then accel=(-accel kvm -cpu host)
+else
+  accel=(-accel tcg)
+  echo "!! /dev/kvm not usable (VT-x off in the BIOS?): emulating the CPU, boot takes minutes, not seconds"
+fi
+
+# ---------------------------------------------------------------- run
+run=$cache/runs/$(date +%Y%m%d-%H%M%S)-${model// /_}-${serial:-noserial}
+mkdir -p "$run"
+tmp=$(mktemp -d)
+qpid=""
+cleanup() {
+  [ -n "$qpid" ] && kill "$qpid" 2>/dev/null || true
+  [ "$img" = 0 ] && sudo -n setfacl -x "u:$USER" "$dev" 2>/dev/null || true
+  if [ "$mode" = fix ] && [ "$img" = 0 ]; then
+    lsblk -nro PATH "$dev" | while read -r b; do sudo -n blockdev --flushbufs "$b" 2>/dev/null || true; done
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+if [ "$img" = 0 ]; then
+  echo "== sudo: granting $USER rw on $dev for this run"
+  sudo setfacl -m "u:$USER:rw" "$dev"
+fi
+
+# The log disk: 64 MB, MBR with one FAT partition (WinPE ignores partitionless "superfloppies").
+# It's attached FIRST so etfsboot sees a non-bootable first disk and skips its "press any key" prompt.
+logimg=$tmp/log.img
+truncate -s 64M "$logimg"
+echo 'start=2048, type=0c' | sfdisk -q "$logimg"
+mkfs.fat -F 32 --offset 2048 -n NTFSCHKLOG "$logimg" $((63 * 1024)) >/dev/null
+L=(-i "$logimg@@1048576")
+printf '%s\r\n' '@echo off' 'setlocal enabledelayedexpansion' "set LOG=%1\\NTFSCHK" \
+  'echo started %date% %time%> %LOG%\STATUS.TXT' \
+  'for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (' \
+  '  if /i not "%%d:"=="%1" if exist %%d:\ (' \
+  '    fsutil fsinfo volumeinfo %%d: > %LOG%\vol_%%d.txt 2>&1' \
+  '    find "File System Name : NTFS" %LOG%\vol_%%d.txt >nul' \
+  '    if !errorlevel!==0 (' \
+  '      echo checking %%d:>> %LOG%\STATUS.TXT' \
+  "      chkdsk %%d: $args < nul > %LOG%\\chkdsk_%%d.txt 2>&1" \
+  '      echo %%d: exit=!errorlevel!>> %LOG%\STATUS.TXT' \
+  '    ) else del %LOG%\vol_%%d.txt' \
+  '  )' \
+  ')' \
+  'echo finished %date% %time%>> %LOG%\STATUS.TXT' > "$tmp/RUN.CMD"
+mmd "${L[@]}" ::/NTFSCHK
+mcopy "${L[@]}" "$tmp/RUN.CMD" ::/NTFSCHK/RUN.CMD
+
+snap=on; [ "$mode" = fix ] && snap=off
+disp=(-display none); [ "$show" = 1 ] && disp=(-display gtk)
+echo "== booting WinPE ($( [ "$show" = 1 ] && echo 'window open' || echo 'headless, --show to watch' ))"
+TMPDIR=${TMPDIR:-/var/tmp} qemu-system-x86_64 "${accel[@]}" -machine q35 -m 3G -smp 2 \
+  -drive "file=$logimg,format=raw,if=ide,index=0" \
+  -drive "file=$byid,format=raw,if=ide,index=1,cache=none,snapshot=$snap" \
+  -drive "file=$pe_iso,media=cdrom,if=ide,index=2" \
+  -boot d -nic none -no-reboot "${disp[@]}" \
+  -monitor "unix:$tmp/mon,server,nowait" &
+qpid=$!
+# belt and braces for the "press any key to boot from CD" prompt: tap space for the first seconds
+( for _ in 1 2 3 4 5 6 7 8; do sleep 1; echo 'sendkey spc' | socat - "UNIX-CONNECT:$tmp/mon" >/dev/null 2>&1 || true; done ) &
+start=$(date +%s)
+while kill -0 "$qpid" 2>/dev/null; do
+  sleep 30
+  kill -0 "$qpid" 2>/dev/null && printf '   … running %d min\r' $(( ($(date +%s) - start) / 60 ))
+done
+wait "$qpid" || true; qpid=""
+echo
+
+# ---------------------------------------------------------------- results
+mcopy -s -n "${L[@]}" ::/NTFSCHK "$run/" 2>/dev/null || true
+for f in "$run"/NTFSCHK/*.txt "$run"/NTFSCHK/*.TXT; do
+  [ -f "$f" ] || continue
+  iconv -f CP437 -t UTF-8 "$f" | tr -d '\r' > "$run/$(basename "$f" | tr 'A-Z' 'a-z')"
+done
+# chkdsk's progress counter is redrawn in place; in a file it smears into the message lines.
+# Keep the raw log as .raw.txt, and a readable one without the counter and per-phase timings.
+for c in "$run"/chkdsk_*.txt; do
+  [ -f "$c" ] || continue
+  mv "$c" "${c%.txt}.raw.txt"
+  sed -E -e 's/Progress: [0-9]+ of [0-9]+ done; Stage: +[0-9]+%; Total: +[0-9]+%; ETA: +[0-9:]+ *\.*//g' \
+    -e 's/ {2,}/ /g; s/ +$//' "${c%.txt}.raw.txt" \
+    | grep -vE '^ *$|Phase duration|Unable to obtain a handle to the event log' > "$c"
+done
+rm -rf "$run/NTFSCHK"
+if [ ! -f "$run/status.txt" ] || ! grep -q '^finished' "$run/status.txt"; then
+  echo "!! no result from WinPE (it didn't boot, didn't find the log disk, or was interrupted)." >&2
+  echo "   Rerun with --show to watch it. Partial logs: $run" >&2
+  exit 4
+fi
+worst=0
+for c in "$run"/chkdsk_*.txt; do
+  case $c in *.raw.txt) continue ;; esac
+  [ -f "$c" ] || continue
+  l=$(basename "$c" .txt); l=${l#chkdsk_}; l=${l^^}
+  code=$(sed -n "s/^$l: exit=\([0-9]*\).*/\1/p" "$run/status.txt")
+  label=$(sed -n 's/^Volume Name *: *//p' "$run/vol_${l,,}.txt" 2>/dev/null)
+  echo "== $l: ${label:-?}  chkdsk exit ${code:-?}"
+  sed -n '/^Stage 1/,$p' "$c" | grep -vE '^ *(Stage [0-9]|[0-9]+ .* processed\.|.* verification completed\.)' | sed 's/^/   /'
+  [ "${code:-3}" -gt "$worst" ] && worst=${code:-3}
+done
+ls "$run"/chkdsk_*.txt >/dev/null 2>&1 || { echo "!! WinPE found no NTFS volume on the disk" >&2; worst=3; }
+echo "== logs: $run"
+exit $worst
