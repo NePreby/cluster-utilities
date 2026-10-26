@@ -62,7 +62,7 @@ hosts:
     ssh: lab8
     tailscale: lkj008-psy
     ip: 100.86.65.72
-    role: research — containerized-red-teaming home, plus papers/pkb/small repos; /mnt/Datas4To backup disk (also `lab` alias)
+    role: research — containerized-red-teaming home, plus papers/small repos (pkb moved to lab10 2026-10-26); /mnt/Datas4To backup disk (also `lab` alias)
     spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects ~/code
@@ -80,7 +80,7 @@ hosts:
     ssh: lab10
     tailscale: lkj010-psy
     ip: 100.127.148.40
-    role: personal use + fleet management (the box that manages the other nodes); internal 4 TB `Data` disk holds personal backups
+    role: personal use + fleet management (the box that manages the other nodes); pkb (since 2026-10-26); internal 4 TB `Data` disk holds personal backups
     spec: Xeon E3-1245 v5 (8 threads), 32 GB RAM, Quadro P2000, 434 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects
