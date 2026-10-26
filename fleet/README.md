@@ -16,6 +16,14 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
 1. **One project, one host.** Research goes on the lab machines by default. The laptop keeps
    desktop/personal things. Only infra (`cluster-utilities`, `agent-utilities`,
    `system-utilities`) lives on every host.
+
+   **Cluster clones are run-only.** When a project also has a clone on an Alliance cluster (fir,
+   narval, …), the fleet host in `projects.yaml` is where the work happens: the working repo and the
+   agents that edit it. The cluster clone is only there to run jobs. Don't edit or commit in it: change
+   code on the owner host, push, then `git pull` on the cluster. Results come back the same way: rsync
+   them to the owner host, or keep them in cluster storage (`/project`, not purgeable `/scratch`), and
+   commit what belongs in git from the owner host. The data can stay on the cluster (e.g.
+   `eeg-analysis-adhd-epilepsy`, `neuro-cocodelics`: code on lab9, data on fir).
 2. **Repos live in `~/Projects`.** `~/code` is legacy and being emptied (fleet-audit flags it as LEGACY).
 3. **Before deleting a copy**, all of these must hold:
    - a `fleet-audit --fetch --all` run ends with every host `audited` and exits 0. A host marked

@@ -4,7 +4,8 @@
 #   <dir name>: [*]                  expected on every host (infra)
 #
 # A project lives on exactly ONE host unless it's infra that every machine needs ([*]), or it's
-# mid-migration (listed on two hosts, marked TEMP). `[?]` = not decided yet. bin/fleet-audit flags:
+# mid-migration (listed on two hosts, marked TEMP). Alliance clusters aren't hosts here: a clone on a
+# cluster is a run-only copy, never edited (see fleet/README.md, rule 1). `[?]` = not decided yet. bin/fleet-audit flags:
 #   UNLISTED  — a dir on some host that isn't in this file
 #   MISPLACED — a dir on a host that isn't in its list (stale copy, or the list is wrong)
 #   UNDECIDED — listed as [?]
