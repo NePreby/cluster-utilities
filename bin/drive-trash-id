@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Move Google Drive files or folders to the trash by ID, using an rclone remote's OAuth token.
+#
+# Why: `rclone purge "remote,root_folder_id=<id>:"` silently does nothing. rclone's drive backend never
+# deletes the root of a remote and Purge doesn't report it (backend/drive/drive.go purgeCheck: the
+# `root != ""` branch is skipped and only Rmdir errors with "can't purge root directory"). Addressing
+# the folder by path doesn't help either when Drive holds several same-named siblings (#35, #36), and
+# `rclone backend moveid` refuses folders. So this calls the Drive API directly: PATCH trashed=true.
+#
+#   drive-trash-id gdrive-yjmantilla <id> [<id> ...]          # shows each item, asks, then trashes
+#   drive-trash-id --dry-run gdrive-yjmantilla <id> ...       # show only
+#   drive-trash-id --yes gdrive-yjmantilla <id> ...           # no prompt
+#
+# Trash is reversible from the Drive web UI (or `rclone backend untrash`) for 30 days.
+# Needs: rclone, jq, curl. The remote must have a scope that covers the items (drive.file only sees
+# files the same client created).
+set -euo pipefail
+
+yes=0 dry=0
+while [[ $# -gt 0 && $1 == --* ]]; do
+  case $1 in
+    --yes) yes=1 ;;
+    --dry-run) dry=1 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+[[ $# -ge 2 ]] || { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+remote=${1%:}; shift
+
+rclone listremotes | grep -qx "$remote:" || { echo "rclone remote '$remote' not found" >&2; exit 1; }
+# Any API call makes rclone refresh an expired access token and save it back to the config.
+rclone about "$remote:" >/dev/null
+token=$(rclone config dump | jq -r --arg r "$remote" '.[$r].token | fromjson | .access_token')
+[[ -n $token && $token != null ]] || { echo "no OAuth token for '$remote'" >&2; exit 1; }
+
+api() { # method url [json-body]; token goes through a file descriptor, not argv
+  curl -sS --fail-with-body -X "$1" -H @<(printf 'Authorization: Bearer %s\n' "$token") \
+    ${3:+-H 'Content-Type: application/json' --data "$3"} \
+    "https://www.googleapis.com/drive/v3/files/$2"
+}
+fields='id,name,mimeType,parents,trashed'
+
+for id in "$@"; do
+  info=$(api GET "$id?fields=$fields&supportsAllDrives=true") || { echo "$id: lookup failed: $info" >&2; exit 1; }
+  name=$(jq -r .name <<<"$info")
+  kind=$(jq -r 'if .mimeType == "application/vnd.google-apps.folder" then "folder" else "file" end' <<<"$info")
+  parents=$(jq -r '.parents // [] | join(",")' <<<"$info")
+  extra=""
+  [[ $kind == folder ]] && extra=", $(rclone lsf -R --files-only "$remote,root_folder_id=$id:" | wc -l) files inside"
+  echo "$id: $kind '$name' in parent $parents$extra$( [[ $(jq -r .trashed <<<"$info") == true ]] && echo ', ALREADY TRASHED')"
+done
+
+(( dry )) && { echo "dry run: nothing changed"; exit 0; }
+if (( ! yes )); then
+  read -rp "Move the $# item(s) above to the Drive trash? [y/N] " ans
+  [[ $ans == [yY] ]] || { echo "aborted"; exit 0; }
+fi
+
+for id in "$@"; do
+  out=$(api PATCH "$id?fields=$fields&supportsAllDrives=true" '{"trashed":true}') || { echo "$id: FAILED: $out" >&2; exit 1; }
+  [[ $(jq -r .trashed <<<"$out") == true ]] && echo "$id: trashed" || { echo "$id: not trashed: $out" >&2; exit 1; }
+done
