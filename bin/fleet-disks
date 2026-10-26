@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # fleet-disks — inventory every internal disk on fleet hosts, including partitions that aren't mounted.
 #
-# Unmounted partitions can only be read as root, so this needs your sudo password once per host.
+# Unmounted partitions can only be read as root. In host mode it asks for your sudo password ONCE,
+# then runs unattended (a host that rejects that password gets one more prompt).
 # Everything is READ-ONLY: each unmounted partition is mounted with `ro` (ext4: `ro,noload`, so not even
 # the journal is replayed; NTFS: ntfs3 `ro`, falling back to ntfs-3g `ro`), inspected, then unmounted.
 # Nothing is written to any data partition, and no fsck is run.
 #
-#   fleet-disks lab3 lab7 …     from the laptop: copy this script to each host, run it there with
-#                               `ssh -t <host> sudo bash …` (asks for the password), save the reports
-#                               to ./fleet-disks-<date>/<host>.txt
+#   fleet-disks lab3 lab7 …     from the laptop: ask for the sudo password once, then copy this script
+#                               to each host, run it there as root (`sudo -S`, password on ssh's stdin),
+#                               and save the reports to ./fleet-disks-<date>/<host>.txt
 #   fleet-disks --list          no root: lsblk overview of THIS host only (what's mounted, sizes)
 #   sudo fleet-disks --scan     the root-side scan of THIS host (what the remote mode runs)
 #
@@ -75,14 +76,28 @@ scan() {
 }
 
 remote() {
-  local out="fleet-disks-$(date +%F)"; mkdir -p "$out"
+  local out="fleet-disks-$(date +%F)" pw="" hpw="" tmp="/tmp/fleet-disks.$$" ok=() failed=()
+  mkdir -p "$out"
+  # Ask once. The password goes to each host on ssh's stdin, into `sudo -S`: never on a command line
+  # (so not in `ps`), never on disk. Assumes the same sudo password on every host; a host that rejects
+  # it gets one more prompt (Enter or 10 min of silence skips it).
+  read -rsp "sudo password (used for every host): " pw; echo
   for h in "$@"; do
-    echo "######## $h — sudo password for $h:"
-    local tmp="/tmp/fleet-disks.$$"
-    scp -q "$0" "$h:$tmp" || { echo "$h: copy failed, skipped"; continue; }
-    ssh -t "$h" "sudo FLEET_DISKS_DU_TIMEOUT=${FLEET_DISKS_DU_TIMEOUT:-120} bash $tmp --scan; rm -f $tmp" | tee "$out/$h.txt"
+    echo "######## $h"
+    hpw=$pw
+    if ! printf '%s\n' "$hpw" | ssh -o BatchMode=yes "$h" "sudo -S -p '' -v" 2>/dev/null; then
+      read -rs -t 600 -p "  $h rejected it; password for $h (Enter to skip): " hpw; echo
+      [ -n "$hpw" ] && printf '%s\n' "$hpw" | ssh -o BatchMode=yes "$h" "sudo -S -p '' -v" 2>/dev/null \
+        || { echo "  $h: skipped (no valid password)"; failed+=("$h"); continue; }
+    fi
+    scp -q "$0" "$h:$tmp" || { echo "  $h: copy failed, skipped"; failed+=("$h"); continue; }
+    printf '%s\n' "$hpw" | ssh -o BatchMode=yes "$h" \
+      "sudo -S -p '' env FLEET_DISKS_DU_TIMEOUT=${FLEET_DISKS_DU_TIMEOUT:-120} bash $tmp --scan; rm -f $tmp" \
+      > "$out/$h.txt" 2>&1 && ok+=("$h") || failed+=("$h")
+    echo "  done: $out/$h.txt ($(grep -c '^========' "$out/$h.txt") partitions)"
   done
-  echo "reports: $out/"
+  pw=""; hpw=""
+  echo "reports: $out/   ok: ${ok[*]:-none}   failed/skipped: ${failed[*]:-none}"
 }
 
 case "${1:-}" in
