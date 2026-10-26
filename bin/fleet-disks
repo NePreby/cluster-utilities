@@ -25,7 +25,8 @@ list() {
 scan() {
   local dry=${FLEET_DISKS_DRY:-0}
   [ "$(id -u)" = 0 ] || [ "$dry" = 1 ] || { echo "--scan needs root (sudo)"; exit 1; }
-  local du_t=${FLEET_DISKS_DU_TIMEOUT:-120} base=/run/fleet-disks.$$
+  local du_t=${FLEET_DISKS_DU_TIMEOUT:-120}
+  base=/run/fleet-disks.$$   # global on purpose: the EXIT trap runs after scan() has returned
   mkdir -p "$base"
   # Unmount whatever we mounted, even on Ctrl-C.
   trap 'for m in "$base"/*; do mountpoint -q "$m" && umount "$m"; rmdir "$m" 2>/dev/null; done; rmdir "$base" 2>/dev/null' EXIT
@@ -60,6 +61,8 @@ scan() {
       esac || { echo "  could not mount read-only, skipped"; rmdir "$m"; continue; }
       ours=1; echo "  (not mounted on this host; mounted read-only just for this scan)"
     else
+      # btrfs subvolumes give lsblk several mountpoints and it shows one at random; prefer the real ones.
+      for t in / /home; do findmnt -rn -o SOURCE "$t" 2>/dev/null | grep -q "^$dev\(\[\|$\)" && m=$t && break; done
       echo "  mounted at $m"
     fi
     df -h --output=size,used,avail,pcent "$m" | sed 's/^/  /'
