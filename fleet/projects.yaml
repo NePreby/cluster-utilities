@@ -30,6 +30,7 @@ projects:
 
   # --- lab10: personal ---
   simgames: [lab10]  # 2026-10-26: laptop's sim-engine, bot, football, acrobots combined (full history per folder); acrobots reference files in git-annex. Laptop copies go once it's on GitHub + Drive
+  youtube-audio-downloader: [lab10]  # 2026-10-26: yt-dlp audio CLI from laptop ~/code (never committed there); downloads/ in git-annex
 
   # --- lab: research ---
   epilepsy: [lab9]                   # moved lab8 -> lab9 2026-10-26 (yjmantilla/epilepsy#2), rsync -anc 0 diffs; lab8 + laptop copies deleted
