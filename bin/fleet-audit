@@ -2,7 +2,8 @@
 # Where is every repo, and is anything in it not saved anywhere else?
 #
 # Scans each repo root (e.g. ~/Projects, ~/code) on every ACTIVE host in fleet/hosts.yaml, over
-# `ssh -o BatchMode=yes` (or locally for `ssh: local`), and checks each entry against
+# `ssh -o BatchMode=yes` (locally for the host whose tailscale: name is this machine; a `ssh: local` host is
+# reached by its tailscale name from anywhere else), and checks each entry against
 # fleet/projects.yaml. Read-only (git runs with --no-optional-locks), except that --fetch runs
 # `git fetch --prune <remote>` for each forge remote. One row per entry that has something to act on:
 #
@@ -66,7 +67,7 @@ for a in "$@"; do
   esac
 done
 
-# --- parse hosts.yaml -> "id US ssh US roots US status" for EVERY host (US = \x1f) ---
+# --- parse hosts.yaml -> "id US ssh US roots US status US tailscale" for EVERY host (US = \x1f) ---
 # Strict on purpose: the deletion rule trusts "every host audited", so an inventory line the parser
 # doesn't understand is a config error (exit 2), never a host that quietly drops out. Every line is
 # normalized first (CR, inline `# …` comments, trailing whitespace), so `  lab2:   # new box` works.
@@ -80,7 +81,7 @@ hosts_all=$(awk -v US="$US" '
     if (st == "active" && (ssh == "" || roots == "")) { err("active host " id ": needs ssh: and roots:") }
     # roots are space-separated, so a path with a space would silently split into bogus roots
     nr=split(roots, rs, " "); for (i=1; i<=nr; i++) if (rs[i] !~ /^(\/|~)/) err("host " id ": root " rs[i] " must start with / or ~ (roots are space-separated; paths with spaces are not supported)")
-    print id US ssh US roots US st; id="" }
+    print id US ssh US roots US st US ts; id="" }
   function err(m) { print "hosts.yaml: " m > "/dev/stderr"; bad=1 }
   { line=$0; sub(/\r$/, "", line); sub(/[[:space:]]+#.*$/, "", line); sub(/^[[:space:]]*#.*$/, "", line); sub(/[[:space:]]+$/, "", line) }
   line == "" { next }
@@ -91,21 +92,27 @@ hosts_all=$(awk -v US="$US" '
   line ~ /^[^ ]/ { err("line " NR ": unexpected top-level line (only hosts: is allowed): " $0); next }
   !inh { err("line " NR ": content before hosts:: " $0); next }
   line ~ /^  [A-Za-z0-9_.-]+:$/ {
-    flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""
+    flush(); id=line; sub(/^  /, "", id); sub(/:$/, "", id); ssh=""; roots=""; st=""; ts=""
     if (id in seen) err("host " id " defined twice"); seen[id]=1; next }
   id != "" && line ~ /^    [a-z_]+:/ {
     key=line; sub(/^    /, "", key); sub(/:.*/, "", key)
     val=line; sub(/^    [a-z_]+:[[:space:]]*/, "", val)
-    if (key == "ssh") ssh=val; else if (key == "roots") roots=val; else if (key == "status") st=tolower(val)
+    if (key == "ssh") ssh=val; else if (key == "roots") roots=val; else if (key == "status") st=tolower(val); else if (key == "tailscale") ts=tolower(val)
     next }
   { err("line " NR " not understood (expected 2-space host id or 4-space key: value): " $0) }
   END { flush(); if (!seenh) err("no hosts: section"); exit bad ? 2 : 0 }' "$HOSTS") || { echo "fix fleet/hosts.yaml first (nothing was scanned)" >&2; exit 2; }
 
 hosts_tsv=""; declare -A known=(); skipped=()
-while IFS="$US" read -r id ssh roots st; do
+# Which host is "here": the one whose tailscale: name is this machine's hostname. It is scanned
+# locally whatever its ssh: says, and a `ssh: local` host (the laptop) is reached over ssh by its
+# tailscale name when the audit runs anywhere else, so the audit works from any fleet box.
+me=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
+while IFS="$US" read -r id ssh roots st ts; do
   [ -z "$id" ] && continue
   known[$id]=$st
   if [ "$st" != active ]; then skipped+=("$id ($st)"); continue; fi
+  if [ -n "$ts" ] && [ "$ts" = "$me" ]; then ssh=local
+  elif [ "$ssh" = local ] && [ -n "$ts" ]; then ssh=$ts; fi
   hosts_tsv+="$id$US$ssh$US$roots"$'\n'
 done <<<"$hosts_all"
 [ -z "$hosts_tsv" ] && { echo "hosts.yaml: no active hosts" >&2; exit 2; }
