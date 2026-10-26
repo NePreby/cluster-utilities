@@ -44,8 +44,8 @@ projects:
   overclaiming-iclr-todo-snapshot-sXSfhz: [lab8]
   clean-neurons: [lab8]
   questionnaire-bias: [lab8]
-  pkb: [lab8]
-  pkb_incoming: [lab8]
+  pkb: [lab8]  # may move to lab10 (personal box), undecided 2026-10-26. Laptop Claude history archived at lab8 ~/archives/transcripts/pkb-laptop-sessions/ (memories merged into the lab8 pkb agent memory); move it along with pkb
+  pkb_incoming: [lab8]  # ingestion inbox, not git; only copy (see #18); goes wherever pkb goes
   shareables: [lab8]
   handoffs: [lab8]
   amica-stuff: [lab8]
