@@ -44,8 +44,8 @@ projects:
   overclaiming-iclr-todo-snapshot-sXSfhz: [lab8]
   clean-neurons: [lab8]
   questionnaire-bias: [lab8]
-  pkb: [lab10, lab8]  # TEMP: moved lab8 -> lab10 2026-10-26 (objects/ in git-annex: lab10 + Drive). Drop lab8 once its old copy is checked and deleted. Claude history (lab8 sessions + laptop archive ~/archives/transcripts/pkb-laptop-sessions/) on lab10
-  pkb_incoming: [lab10, lab8]  # ingestion inbox, not git or annex; copied lab8 -> lab10 2026-10-26; lab10 copy is the live one; drop lab8 with pkb
+  pkb: [lab10]  # moved from lab8 2026-10-26 (lab8 copy checked and deleted). objects/ in git-annex: lab10 + Drive. Claude history incl. laptop archive ~/archives/transcripts/pkb-laptop-sessions/ on lab10
+  pkb_incoming: [lab10]  # ingestion inbox, not git or annex; only copy (see #18)
   shareables: [lab8]
   handoffs: [lab8]
   amica-stuff: [lab8]
