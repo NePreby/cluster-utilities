@@ -71,7 +71,7 @@ hosts:
     ssh: lab9
     tailscale: lkj009-psy
     ip: 100.112.76.58
-    role: research — epilepsy (data to the 4 TB HDD), eeg-analysis-adhd-epilepsy + neuro-cocodelics (data on fir)
+    role: research — epilepsy (data in /home ~/datasets/epilepsy; NOT the 4 TB HDD, which holds others' data, see disks.yaml), eeg-analysis-adhd-epilepsy + neuro-cocodelics (data on fir)
     spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 440 GB /home, CachyOS; login shell bash (no SSH menu)
     auth: key+password
     roots: ~/Projects
