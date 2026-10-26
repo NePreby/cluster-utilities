@@ -28,6 +28,9 @@ projects:
   study-permit: [laptop]
   os-debugs: [laptop, lab8]
 
+  # --- lab10: personal ---
+  simgames: [lab10]  # 2026-10-26: laptop's sim-engine, bot, football, acrobots combined (full history per folder); acrobots reference files in git-annex. Laptop copies go once it's on GitHub + Drive
+
   # --- lab: research ---
   epilepsy: [lab9]                   # moved lab8 -> lab9 2026-10-26 (yjmantilla/epilepsy#2), rsync -anc 0 diffs; lab8 + laptop copies deleted
   eeg-analysis-adhd-epilepsy: [lab9] # code only (BabaSanfour/eeg-analysis-adhd-epilepsy); data on fir /project/6114380/shared/eeg-adhdh-epilepsy
