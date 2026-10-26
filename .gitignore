@@ -219,3 +219,4 @@ __marimo__/
 
 # multi-model review panels: keep requests/reviews/synthesis, not raw CLI logs
 reviews/*/_run_logs/
+fleet-disks-*/

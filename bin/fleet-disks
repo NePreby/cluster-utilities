@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# fleet-disks — inventory every internal disk on fleet hosts, including partitions that aren't mounted.
+#
+# Unmounted partitions can only be read as root, so this needs your sudo password once per host.
+# Everything is READ-ONLY: each unmounted partition is mounted with `ro` (ext4: `ro,noload`, so not even
+# the journal is replayed; NTFS: ntfs3 `ro`, falling back to ntfs-3g `ro`), inspected, then unmounted.
+# Nothing is written to any data partition, and no fsck is run.
+#
+#   fleet-disks lab3 lab7 …     from the laptop: copy this script to each host, run it there with
+#                               `ssh -t <host> sudo bash …` (asks for the password), save the reports
+#                               to ./fleet-disks-<date>/<host>.txt
+#   fleet-disks --list          no root: lsblk overview of THIS host only (what's mounted, sizes)
+#   sudo fleet-disks --scan     the root-side scan of THIS host (what the remote mode runs)
+#
+# Env: FLEET_DISKS_DRY=1 with --scan: no root, no mounting; only shows what would be scanned.
+#      FLEET_DISKS_DU_TIMEOUT (seconds per partition for the per-folder `du`, default 120; 0 skips du).
+set -u
+
+list() {
+  echo "== $(hostname)  $(date '+%F %T')"
+  lsblk -o NAME,SIZE,ROTA,TRAN,MODEL,FSTYPE,LABEL,MOUNTPOINT,FSAVAIL,FSUSE% -e7,11,252
+}
+
+scan() {
+  local dry=${FLEET_DISKS_DRY:-0}
+  [ "$(id -u)" = 0 ] || [ "$dry" = 1 ] || { echo "--scan needs root (sudo)"; exit 1; }
+  local du_t=${FLEET_DISKS_DU_TIMEOUT:-120} base=/run/fleet-disks.$$
+  mkdir -p "$base"
+  # Unmount whatever we mounted, even on Ctrl-C.
+  trap 'for m in "$base"/*; do mountpoint -q "$m" && umount "$m"; rmdir "$m" 2>/dev/null; done; rmdir "$base" 2>/dev/null' EXIT
+  list
+  echo
+  echo "== SMART health"
+  if command -v smartctl >/dev/null; then
+    for d in $(lsblk -dno PATH -e7,11,252 | grep -v zram); do
+      printf '%s: %s\n' "$d" "$(smartctl -H "$d" 2>/dev/null | grep -iE 'overall-health|SMART Health Status' | sed 's/.*: *//')"
+    done
+  else
+    echo "smartctl not installed (pacman -S smartmontools), skipped"
+  fi
+  # -P prints KEY="value" pairs, so empty fields and labels with spaces parse correctly.
+  lsblk -Ppno NAME,TYPE,FSTYPE,SIZE,LABEL,MOUNTPOINT -e7,11,252 | while read -r line; do
+    local NAME="" TYPE="" FSTYPE="" SIZE="" LABEL="" MOUNTPOINT=""
+    eval "$line"
+    local dev=$NAME type=$TYPE fs=$FSTYPE size=$SIZE label=$LABEL mnt=$MOUNTPOINT
+    [ "$type" = part ] || [ "$type" = disk ] || continue
+    case "$fs" in ext2|ext3|ext4|ntfs|btrfs|xfs|exfat|vfat) ;; *) continue ;; esac
+    [ "$label" = "" ] && label="-"
+    echo
+    echo "======== $dev  fs=$fs  size=$size  label=$label"
+    local m="$mnt" ours=0
+    if [ -z "$m" ] && [ "$dry" = 1 ]; then echo "  (dry run: would mount read-only)"; continue; fi
+    if [ -z "$m" ]; then
+      m="$base/$(basename "$dev")"; mkdir -p "$m"
+      case "$fs" in
+        ext*) mount -o ro,noload "$dev" "$m" ;;
+        ntfs) mount -t ntfs3 -o ro "$dev" "$m" 2>/dev/null || mount -t ntfs-3g -o ro "$dev" "$m" ;;
+        *)    mount -o ro "$dev" "$m" ;;
+      esac || { echo "  could not mount read-only, skipped"; rmdir "$m"; continue; }
+      ours=1; echo "  (not mounted on this host; mounted read-only just for this scan)"
+    else
+      echo "  mounted at $m"
+    fi
+    df -h --output=size,used,avail,pcent "$m" | sed 's/^/  /'
+    echo "  -- top level (owner, modified, name)"
+    find "$m" -mindepth 1 -maxdepth 1 -printf '  %u\t%TY-%Tm-%Td\t%f\n' 2>/dev/null | sort -k3 | head -60
+    [ -d "$m/Users" ] && { echo "  -- Windows user folders"; ls -1 "$m/Users" 2>/dev/null | sed 's/^/    /'; }
+    [ -d "$m/home" ] && { echo "  -- Linux home folders"; ls -1 "$m/home" 2>/dev/null | sed 's/^/    /'; }
+    if [ "$du_t" != 0 ] && [ "$fs" != vfat ]; then
+      echo "  -- sizes of top-level folders (du, up to ${du_t}s; incomplete if it times out)"
+      timeout "$du_t" nice -n 19 ionice -c3 du -xsh "$m"/* "$m"/.[!.]* 2>/dev/null | sort -rh | head -25 | sed "s|$m/||; s/^/    /"
+    fi
+    if [ "$ours" = 1 ]; then umount "$m" && rmdir "$m"; fi
+  done
+}
+
+remote() {
+  local out="fleet-disks-$(date +%F)"; mkdir -p "$out"
+  for h in "$@"; do
+    echo "######## $h — sudo password for $h:"
+    local tmp="/tmp/fleet-disks.$$"
+    scp -q "$0" "$h:$tmp" || { echo "$h: copy failed, skipped"; continue; }
+    ssh -t "$h" "sudo FLEET_DISKS_DU_TIMEOUT=${FLEET_DISKS_DU_TIMEOUT:-120} bash $tmp --scan; rm -f $tmp" | tee "$out/$h.txt"
+  done
+  echo "reports: $out/"
+}
+
+case "${1:-}" in
+  --list) list ;;
+  --scan) scan ;;
+  ""|-h|--help) sed -n '2,17p' "$0" ;;
+  *) remote "$@" ;;
+esac
