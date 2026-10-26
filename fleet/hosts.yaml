@@ -3,6 +3,7 @@
 # Keep to this flat shape (2-space host id, 4-space `key: value`): bin/fleet-audit reads it with
 # awk, since none of the hosts ship a YAML parser. Alliance clusters are NOT here — they're
 # reached via ~/.ssh/config + cluster-login (see AGENT.md); this is the Tailscale fleet.
+# Each box's internal disks (what's on them, whose they are, what's usable): fleet/disks.yaml.
 #
 #   ssh:        the ~/.ssh/config alias, or `local` for the machine you're sitting at.
 #               Lab ids/aliases follow the hostname: lkj0NN-psy -> labNN (no leading zero).

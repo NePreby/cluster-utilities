@@ -25,7 +25,11 @@ command myself: the laptop and the lab workstations, all on the tailnet `tail2e7
    commit what belongs in git from the owner host. The data can stay on the cluster (e.g.
    `eeg-analysis-adhd-epilepsy`, `neuro-cocodelics`: code on lab9, data on fir).
 2. **Repos live in `~/Projects`.** `~/code` is legacy and being emptied (fleet-audit flags it as LEGACY).
-3. **Before deleting a copy**, all of these must hold:
+3. **Before putting data on a box, or mounting, formatting or adding to fstab any disk, check
+   `fleet/disks.yaml`.** These boxes were reused from earlier lab members, and most extra disks and
+   partitions hold other people's data or old Windows/Linux installs. Today the usable space is each
+   box's own `/home`, plus the two `own-backup` disks (lab8 `Datas4To`, lab10 `Data`).
+4. **Before deleting a copy**, all of these must hold:
    - a `fleet-audit --fetch --all` run ends with every host `audited` and exits 0. A host marked
      `NOT AUDITED` or `INCOMPLETE` proves nothing, because a missing row is not a clean row. (A
      `skipped host` line is fine only if that host isn't the one you're deleting from.)
@@ -116,6 +120,8 @@ Until it's merged, `_incoming-from-laptop/` shows as UNTRACKED on the owner host
 Only after step 2 passes is the source copy's data safe to delete.
 
 ## Adding a lab machine (CachyOS already installed)
+
+After onboarding, run `bin/fleet-disks <labNN>` from the laptop (asks for the sudo password once, read-only) and add the box's disks to `fleet/disks.yaml`.
 
 **0. Optional: make an auth key** so the box needs no browser login. In
 <https://login.tailscale.com/admin/settings/keys>, generate an auth key (reusable if you're doing

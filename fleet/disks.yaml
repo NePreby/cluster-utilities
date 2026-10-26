@@ -1,0 +1,556 @@
+# Every internal disk in the lab fleet: what's on it, whose it is, and what we may use.
+#
+# Why this file exists: these workstations were reused from earlier lab members. Besides the CachyOS
+# install, most of them carry old Windows installs, old Linux installs and big research datasets that
+# belong to other people. That data is invisible unless you mount the partitions. Before putting
+# project data or backups on a box, or formatting, mounting or fstab-ing anything, look here first:
+# deciding where epilepsy goes (2026-10-25) needed exactly this inventory, and the first plan pointed at
+# a "spare" 4 TB disk that turned out to be 95% full of someone else's MEG data.
+#
+# Source: bin/fleet-disks (read-only scan, 2026-10-25; every disk passed SMART) + lsblk for models,
+# serials and UUIDs. Full per-folder reports were in cluster-utilities/fleet-disks-2026-10-25/ on the
+# laptop (gitignored). Re-run `bin/fleet-disks <hosts>` after any disk change and update this file.
+#
+# Identify disks by `serial` and partitions by `uuid`: sdX/nvme names can change between boots, and
+# labels repeat (lab8 and lab9 both have an NTFS disk labelled "Datas4To").
+#
+# use:
+#   os-*                      this CachyOS install (boot, root+home on btrfs subvolumes, swap)
+#   own-backup                the user's own backup disk (OK to use, see the note)
+#   others-data               research data of other lab members: don't write, move or format without the lab's OK
+#   legacy-windows*           an old Windows install (user profiles, recovery, MSR)
+#   legacy-linux*             an old Linux install (home dirs of former users)
+#   own-backup+others-data    the user's backups share the disk with someone else's data
+# Usable space for projects today = each box's own /home (os-root+home) plus the two own-backup disks.
+# hosts.yaml is the host inventory; mounts that must survive reboots are tracked in #27.
+
+hosts:
+  lab3:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: ST1000DM003-1ER162
+      serial: Z4Y6KHG0
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: os-boot
+          fs: vfat
+          uuid: 4901-9E53
+          size: 8G
+          mounted: /boot
+          usage: "242M used, 7.8G free (3%)"
+        - part: sda2
+          use: os-root+home
+          fs: btrfs
+          uuid: 14e1a42d-302b-4e0d-8c50-785759286e3d
+          size: 923.5G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "20G used, 904G free (3%)"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD40EZRX-00SPEB0"
+      serial: WD-WCC4E5HV3KR1
+      size: 3.6T
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: others-data
+          fs: ext4
+          uuid: 47c4c8b1-488b-4bf0-9cd9-97d8a6f6abe2
+          size: 3.6T
+          mounted: /data
+          usage: "3.2T used, 294G free (92%)"
+          largest: ["camcan 2.4T", "bids 325G", "windows7_karim_backup 261G", "mint_arthur_backup 76G", "github 76G"]
+          note: "mounted at /data via fstab (nofail). mint_arthur_backup and windows7_karim_backup were written 2026-10-24 ~02:15, probably during onboarding (old systems saved before the reinstall)"
+    - disk: sdc        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SV300S37A480G"
+      serial: 50026B7253047CA5
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sdc1
+          use: legacy-linux-boot
+          fs: vfat
+          uuid: A884-152E
+          size: 300M
+          mounted: "not mounted"
+          usage: "288K used, 300M free (1%)"
+        - part: sdc2
+          use: legacy-linux
+          fs: ext4
+          uuid: 3daa76d0-ba81-434f-ad91-e1a76151d9d7
+          size: 412.5G
+          mounted: "not mounted"
+          usage: "371G used, 15G free (97%)"
+          linux_homes: [arthur, data]
+          largest: ["home 332G"]
+        - part: sdc3
+          use: legacy-swap
+          fs: swap
+          uuid: d2c8b3cf-39c2-4803-9e15-d9a883454977
+          size: 34.3G
+          mounted: "not mounted"
+  lab4:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: ST1000DM003-1ER162
+      serial: Z4Y6LDF8
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: "Windows RE Tools"
+          uuid: B090C91D90C8EB44
+          size: 795M
+          mounted: "not mounted"
+          usage: "795M used, 0 free (100%)"
+        - part: sda2
+          use: legacy-windows-boot
+          fs: vfat
+          label: SYSTEM
+          uuid: 54F7-3066
+          size: 100M
+          mounted: "not mounted"
+          usage: "56M used, 41M free (58%)"
+        - part: sda3
+          use: legacy-windows-msr
+          fs: none
+          size: 128M
+          mounted: "not mounted"
+        - part: sda4
+          use: legacy-windows
+          fs: ntfs
+          label: Windows
+          uuid: 36BE1837BE17EE5D
+          size: 497.3G
+          mounted: "not mounted"
+          usage: "127G used, 372G free (26%)"
+          windows_users: [ca-psy, ca-psy1, karim, p0990427, p1001147, p1017783, p1051614, p1072312, p1082621, p1113662, p1114991, pasca]
+        - part: sda5
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: HP_RECOVERY
+          uuid: 92C6A72EC6A71211
+          size: 12G
+          mounted: "not mounted"
+          usage: "11G used, 1.8G free (86%)"
+        - part: sda6
+          use: legacy-linux
+          fs: ext4
+          uuid: 2798b6ba-bd92-4dfa-85d9-559be7cfa68a
+          size: 389.5G
+          mounted: "not mounted"
+          usage: "376G used, 0 free (100%)"
+          linux_homes: [cocolabuser1, dmalt, karim, pauline, thomasthiery]
+        - part: sda7
+          use: legacy-swap
+          fs: swap
+          uuid: a7735bad-2b3a-4196-9423-e2a779b975b5
+          size: 31.8G
+          mounted: "not mounted"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SV300S37A480G"
+      serial: 50026B7253047BF2
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: os-boot
+          fs: vfat
+          uuid: 6641-998B
+          size: 4G
+          mounted: /boot
+          usage: "1.2G used, 2.8G free (30%)"
+        - part: sdb2
+          use: os-swap
+          fs: swap
+          uuid: 1573437f-2807-4a88-86cc-bd9f90abec75
+          size: 39.1G
+          mounted: "[SWAP]"
+        - part: sdb3
+          use: os-root+home
+          fs: btrfs
+          uuid: e79ac1ba-9e73-45b0-836b-2b35c8c3480c
+          size: 404.1G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "17G used, 387G free (5%)"
+  lab6:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD10EZEX-60WN4A0"
+      serial: WD-WCC6Y1CRNEZH
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: os-boot
+          fs: vfat
+          label: EFI
+          uuid: 0640-6631
+          size: 8G
+          mounted: /boot
+          usage: "289M used, 7.8G free (4%)"
+        - part: sda2
+          use: os-root+home
+          fs: btrfs
+          uuid: fa34f246-9d1f-4a6c-a0c8-ea21d3c5de61
+          size: 493.7G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "11G used, 482G free (3%)"
+        - part: sda5
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: HP_RECOVERY
+          uuid: B64CE8374CE7F053
+          size: 15.4G
+          mounted: "not mounted"
+          usage: "14G used, 2.3G free (86%)"
+        - part: sda6
+          use: legacy-linux
+          fs: ext4
+          uuid: e02d711c-583c-43a2-acb4-d02b8c91fd42
+          size: 382.5G
+          mounted: "not mounted"
+          usage: "319G used, 40G free (90%)"
+          linux_homes: [arthur, dmalt, karim, veronique]
+        - part: sda7
+          use: os-swap
+          fs: swap
+          uuid: 4fb6fe72-f785-47a6-9faa-1fe8f5913cd8
+          size: 31.9G
+          mounted: "[SWAP]"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SHFS37A480G"
+      serial: 50026B72630ABD8B
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: others-data
+          fs: ntfs
+          label: SSD500
+          uuid: 62C97887525D228C
+          size: 447.1G
+          mounted: "not mounted"
+          usage: "298G used, 150G free (67%)"
+          largest: ["aut_gamma 298G"]
+  lab7:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SHFS37A480G"
+      serial: 50026B72630AC6D0
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: os-boot
+          fs: vfat
+          uuid: 8CFC-637F
+          size: 4G
+          mounted: /boot
+          usage: "1.6G used, 2.5G free (40%)"
+        - part: sda2
+          use: os-swap
+          fs: swap
+          uuid: 2bc5a165-79ee-4c37-81c4-7ac6e7ed0d34
+          size: 39.1G
+          mounted: "[SWAP]"
+        - part: sda3
+          use: os-root+home
+          fs: btrfs
+          uuid: 218b1e11-026e-42d9-8896-46a53f0a0c89
+          size: 404.1G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "19G used, 386G free (5%)"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD10EZEX-60WN4A0"
+      serial: WD-WCC6Y3SKJTR7
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: others-data
+          fs: ext4
+          label: Disk1TB
+          uuid: 097e0234-fbb3-48cd-b937-1c980c11abf4
+          size: 931.5G
+          mounted: "not mounted"
+          usage: "830G used, 40G free (96%)"
+          linux_homes: [karim]
+          largest: ["Connectivity 774G"]
+    - disk: sdc        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD40EZRZ-00WN9B0"
+      serial: WD-WCC4E6RKNL91
+      size: 3.6T
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sdc1
+          use: others-data
+          fs: ext4
+          label: Disk4To
+          uuid: f12f50c7-177b-46b2-b708-cd0b04c2a06f
+          size: 3.6T
+          mounted: "not mounted"
+          usage: "3.3T used, 104G free (98%)"
+          largest: ["OlaData 2.5T", "data_time_series 841G"]
+  lab8:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD10EZEX-60WN4A0"
+      serial: WD-WCC6Y4VYZPT6
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: "Windows RE Tools"
+          uuid: 98EE9F44EE9F1A18
+          size: 1.3G
+          mounted: "not mounted"
+          usage: "394M used, 890M free (31%)"
+        - part: sda2
+          use: legacy-windows-boot
+          fs: vfat
+          label: SYSTEM
+          uuid: 2262-1ABE
+          size: 100M
+          mounted: "not mounted"
+          usage: "76M used, 21M free (79%)"
+        - part: sda3
+          use: legacy-windows-msr
+          fs: none
+          size: 128M
+          mounted: "not mounted"
+        - part: sda4
+          use: legacy-windows
+          fs: ntfs
+          label: Windows
+          uuid: 10B2D0DBB2D0C5FE
+          size: 497G
+          mounted: "not mounted"
+          usage: "411G used, 87G free (83%)"
+          windows_users: [ca-psy, ca-psy1, Karim, stef]
+        - part: sda5
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: HP_RECOVERY
+          uuid: 5E4ADF684ADF3B89
+          size: 13.9G
+          mounted: "not mounted"
+          usage: "12G used, 2.1G free (86%)"
+        - part: sda6
+          use: legacy-linux
+          fs: ext4
+          uuid: d774d998-03db-4883-a973-c0c779539d85
+          size: 387.2G
+          mounted: "not mounted"
+          usage: "345G used, 18G free (96%)"
+          linux_homes: [clara, karim, yorguin]
+          largest: ["home 226G"]
+          note: "has a `yorguin` home dir: possibly the user's own old files, worth a look"
+        - part: sda7
+          use: legacy-swap
+          fs: swap
+          uuid: 63dffb19-9a47-41f4-b9a0-aa5af84da0f6
+          size: 31.9G
+          mounted: "not mounted"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD40EZRZ-00WN9B0"
+      serial: WD-WCC4E7CUKYVR
+      size: 3.6T
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: legacy-windows-msr
+          fs: none
+          size: 128M
+          mounted: "not mounted"
+        - part: sdb2
+          use: own-backup+others-data
+          fs: ntfs
+          label: Datas4To
+          uuid: 9A32B80E32B7ECFF
+          size: 3.6T
+          mounted: /mnt/Datas4To
+          usage: "2.2T used, 1.6T free (59%)"
+          largest: ["backup_yorguin 1.2T", "Yann 999G"]
+          note: "in fstab since 2026-10-25 (#27). backup_yorguin = HD710_PRO/easystore copies + _ELEMENTS (only copy, #18). \"Yann\" is someone else's"
+    - disk: sdc        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SHFS37A480G"
+      serial: 50026B726607CA2B
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sdc1
+          use: os-root+home
+          fs: btrfs
+          uuid: ebc6d375-b7d4-41bf-921f-1006ad861297
+          size: 439.1G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "185G used, 254G free (43%)"
+        - part: sdc2
+          use: os-boot
+          fs: vfat
+          uuid: 866A-9C0A
+          size: 8G
+          mounted: /boot
+          usage: "3.5G used, 4.6G free (44%)"
+  lab9:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD10EZEX-60WN4A0"
+      serial: WD-WCC6Y2AR589V
+      size: 931.5G
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: "Windows RE Tools"
+          uuid: A090FEE090FEBC3A
+          size: 1.3G
+          mounted: "not mounted"
+          usage: "394M used, 890M free (31%)"
+        - part: sda2
+          use: legacy-windows-boot
+          fs: vfat
+          label: SYSTEM
+          uuid: E6FD-D314
+          size: 100M
+          mounted: "not mounted"
+          usage: "76M used, 21M free (79%)"
+        - part: sda3
+          use: legacy-windows-msr
+          fs: none
+          size: 128M
+          mounted: "not mounted"
+        - part: sda4
+          use: legacy-windows
+          fs: ntfs
+          label: Windows
+          uuid: F8EE24CDEE2485CA
+          size: 495.7G
+          mounted: "not mounted"
+          usage: "88G used, 408G free (18%)"
+          windows_users: [Karim, ca-psy, stef]
+        - part: sda5
+          use: legacy-windows-recovery
+          fs: ntfs
+          label: HP_RECOVERY
+          uuid: 54B46B46B46B29A6
+          size: 13.9G
+          mounted: "not mounted"
+          usage: "12G used, 2.1G free (86%)"
+        - part: sda6
+          use: legacy-linux
+          fs: ext4
+          uuid: 32d30b58-444b-4dd7-a2eb-e001deef2623
+          size: 388.6G
+          mounted: "not mounted (was mounted read-only at /mnt/sda6 by the lab9 epilepsy agent during the 2026-10-25 scan; not in fstab)"
+          usage: "339G used, 25G free (94%)"
+          linux_homes: [admin, karim]
+        - part: sda7
+          use: legacy-swap
+          fs: swap
+          uuid: 313b13e8-0024-447e-8012-b8040862d551
+          size: 31.9G
+          mounted: "not mounted"
+    - disk: sdb        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD40EZRZ-00WN9B0"
+      serial: WD-WCC4E5VF8S5V
+      size: 3.6T
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sdb1
+          use: legacy-windows-msr
+          fs: none
+          size: 128M
+          mounted: "not mounted"
+        - part: sdb2
+          use: others-data
+          fs: ntfs
+          label: Datas4To
+          uuid: D260CC3D60CC2A55
+          size: 3.6T
+          mounted: "not mounted (was mounted read-only at /mnt/Datas4To by the lab9 epilepsy agent during the 2026-10-25 scan; not in fstab)"
+          usage: "3.5T used, 206G free (95%)"
+          largest: ["3_SoLaugh_HL_MEG 2.8T", "1_Analyses_Intra_EM_Odor 349G", "0_IRMf_Graph-Connectivity 178G", "4_PremaTerm_EEG 95G"]
+          note: "same label as lab8's disk, so mount by UUID only. NOT for epilepsy (95% full, others' data); epilepsy goes to /home"
+    - disk: sdc        # sdX/nvme names can change between boots: match by serial
+      model: "KINGSTON SHFS37A480G"
+      serial: 50026B726607C9B9
+      size: 447.1G
+      type: ssd
+      bus: sata
+      partitions:
+        - part: sdc1
+          use: os-boot
+          fs: vfat
+          uuid: 9342-0FC7
+          size: 8G
+          mounted: /boot
+          usage: "1.6G used, 6.5G free (20%)"
+        - part: sdc2
+          use: os-root+home
+          fs: btrfs
+          uuid: 87177201-b759-4adc-a0d4-58f3b2e51917
+          size: 439.1G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "26G used, 414G free (6%)"
+  lab10:
+    - disk: sda        # sdX/nvme names can change between boots: match by serial
+      model: "WDC WD40EZRZ-00GXCB0"
+      serial: WD-WCC7K5AP9T6X
+      size: 3.6T
+      type: hdd
+      bus: sata
+      partitions:
+        - part: sda1
+          use: own-backup
+          fs: ext4
+          label: Data
+          uuid: baea8834-5393-410e-b0df-f1f295b42439
+          size: 3.6T
+          mounted: /mnt/Data
+          usage: "2.7T used, 736G free (79%)"
+          largest: ["backup_yorguin 2.7T"]
+          note: "in fstab since 2026-10-25 at /mnt/Data (was /run/media/yorguin/Data)"
+    - disk: nvme0n1        # sdX/nvme names can change between boots: match by serial
+      model: "SAMSUNG MZVKW512HMJP-000H1"
+      serial: S34CNX0J204086
+      size: 476.9G
+      type: nvme
+      bus: nvme
+      partitions:
+        - part: nvme0n1p1
+          use: os-boot
+          fs: vfat
+          uuid: 8C58-172A
+          size: 4G
+          mounted: /boot
+          usage: "1.2G used, 2.8G free (30%)"
+        - part: nvme0n1p2
+          use: os-swap
+          fs: swap
+          uuid: 9a195666-0a86-41d7-b14e-43c991d09d72
+          size: 39.1G
+          mounted: "[SWAP]"
+        - part: nvme0n1p3
+          use: os-root+home
+          fs: btrfs
+          uuid: fb21cf23-5b63-4682-bfb0-358e6c332ef1
+          size: 433.9G
+          mounted: "/ and /home (btrfs subvolumes)"
+          usage: "27G used, 408G free (7%)"
