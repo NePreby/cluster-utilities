@@ -1,0 +1,23 @@
+#!/bin/bash
+# One line per run: ethernet/Wi-Fi state + internet check, for cluster-utilities issue #10.
+# Logs to ~/.local/state/netlog/YYYY-MM.tsv (tab-separated, header on first line of each file).
+# Run every minute by fleet/systemd/netlog.timer (user unit; needs `loginctl enable-linger`).
+#   netlog --changes   print only the lines where something changed (all months)
+dev=${NETLOG_DEV:-eno1}
+dir=$HOME/.local/state/netlog; f=$dir/$(date +%Y-%m).tsv
+if [ "$1" = --changes ]; then
+  cat "$dir"/*.tsv | awk -F'\t' '$1=="time"{next} {k=$2 FS $3 FS $4 FS $5 FS $6 FS $7 FS $8} k!=p{print; p=k}'
+  exit
+fi
+mkdir -p "$dir"
+[ -s "$f" ] || printf 'time\teth_addr\tcarrier\tspeed\tpartner_pause\teth_http\twifi_addr\tdefault_dev\n' > "$f"
+addr=$(ip -4 -o addr show "$dev" 2>/dev/null | awk '{print $4}' | head -1)
+carrier=$(cat /sys/class/net/"$dev"/carrier 2>/dev/null)
+et=$(ethtool "$dev" 2>/dev/null)
+speed=$(awk -F': ' '/Speed:/{print $2}' <<<"$et")
+pause=$(awk -F': ' '/Link partner advertised pause frame use/{print $2}' <<<"$et")
+if [ -n "$addr" ] && curl -s -m4 --interface "$dev" -o /dev/null http://ping.archlinux.org/nm-check.txt; then http=ok; else http=fail; fi
+wifi=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | head -1)
+# the device the kernel would actually use for internet traffic (lowest-metric default route)
+defdev=$(ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Iseconds)" "${addr:--}" "${carrier:--}" "${speed:--}" "${pause:--}" "$http" "${wifi:--}" "${defdev:--}" >> "$f"

@@ -1,0 +1,7 @@
+[Unit]
+Description=Log ethernet/Wi-Fi state and internet reachability (cluster-utilities #10)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/netlog
+LogLevelMax=notice
