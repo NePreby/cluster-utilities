@@ -29,7 +29,7 @@ projects:
 
   # --- lab: research ---
   epilepsy: [lab8]                   # data on lab8 since 2026-10-24, checksum-verified (paths: epilepsy README); laptop checkout is code-only
-  speech-representations: [lab3]     # moved from lab8 2026-10-25; lab8 copy kept until fleet-audit clears it
+  speech-representations: [lab3]     # moved from lab8 2026-10-25; lab8 copy deleted after verification
   containerized-red-teaming: [lab8]
   crt-pr130: [lab8]
   gemini-agy-investigation-P88aiW: [lab8]
@@ -46,7 +46,6 @@ projects:
   shareables: [lab8]
   handoffs: [lab8]
   amica-stuff: [lab8]
-  speech-representations-lineage-report: [lab8]
   interp: [lab8]
   gbfb-port: [lab8]
   complex-seizures: [lab8]
