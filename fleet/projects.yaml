@@ -31,6 +31,8 @@ projects:
   # --- lab10: personal ---
   simgames: [lab10]  # 2026-10-26: laptop's sim-engine, bot, football, acrobots combined (full history per folder); acrobots reference files in git-annex. Laptop copies go once it's on GitHub + Drive
   youtube-audio-downloader: [lab10]  # 2026-10-26: yt-dlp audio CLI from laptop ~/code (never committed there); downloads/ in git-annex
+  genome-pgs: [lab10]  # 2026-10-27 from laptop: pgsc_calc on my 23andMe genotype; private repo, genetic data only in git-annex (lab10 + Drive), ref panel local only
+  speech-project-stephanie: [lab10]  # 2026-10-27 from laptop ~/Projects/speech-project: hyperresearch notes on spasmodic dysphonia; data re-downloadable (Saarbrücken Voice DB)
   gemini-agy-investigation-outputs: [lab10]  # 2026-10-27: git-annex archive of lab8 gemini-agy-investigation-P88aiW/outputs (red-teaming run data, Drive copy); usable or stale: containerized-red-teaming#144
 
   # --- lab: research ---
