@@ -25,7 +25,7 @@ projects:
   linux-config: [laptop]
   kirby: [laptop]  # dev on the laptop (katam = private yjmantilla/kirby-online; personal-files branch in git-annex). The co-op servers (coop/coop2.yorguin.foo: systemd user units coop{,2}-relay + coop{,2}-tunnel) run on lab10 from ~/kirby-private (not a repo; moved from lab8 2026-10-26; saves snapshotted into personal-files). Deploy with LAB=lab10 / --lab lab10 (the laptop's `lab` alias is lab8)
   study-permit: [laptop]
-  os-debug: [*]  # since 2026-10-27: private yjmantilla/os-debug, cloned on every host; notes/YYYY-MM-DD-<host>-<topic>.md; transcripts collected on lab10 (git-annex, Drive only) with collect-transcripts.sh. Old os-debugs folders (laptop, lab8) still to remove
+  os-debug: [*]  # since 2026-10-27: private yjmantilla/os-debug, cloned on every host; notes/YYYY-MM-DD-<host>-<topic>.md; transcripts collected on lab10 (git-annex, Drive only) with collect-transcripts.sh. Old os-debugs folders (laptop, lab8) replaced by clones
 
   # --- lab10: personal ---
   simgames: [lab10]  # 2026-10-26: laptop's sim-engine, bot, football, acrobots combined (full history per folder); acrobots reference files in git-annex. Laptop copies go once it's on GitHub + Drive
