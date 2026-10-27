@@ -40,13 +40,11 @@ projects:
   speech-representations: [lab3]     # moved from lab8 2026-10-25; lab8 copy deleted after verification
   containerized-red-teaming: [lab8]
   crt-pr130: [lab8]
-  gemini-agy-investigation-P88aiW: [lab8]
-  gemini-agy-pr: [lab8]
+  gemini-agy-investigation-P88aiW: [lab8]  # branch fix/agy-generic-capture on GitHub (containerized-red-teaming#143); outputs/ archived in gemini-agy-investigation-outputs
   aaai-overclaiming-paper: [lab8]
   aaai-overclaiming-paper-arxiv: [lab8]
   overclaiming-paper-arxiv: [lab8]
-  overclaiming-paper-iclr: [lab8]
-  overclaiming-iclr-todo-snapshot-sXSfhz: [lab8]
+  overclaiming-paper-iclr: [lab8]  # Overleaf is current; old stash + TODO-snapshot drafts in private overclaiming-paper-private (2026-10-27)
   clean-neurons: [lab8]
   questionnaire-bias: [lab8]
   pkb: [lab10]  # moved from lab8 2026-10-26 (lab8 copy checked and deleted). objects/ in git-annex: lab10 + Drive. Claude history incl. laptop archive ~/archives/transcripts/pkb-laptop-sessions/ on lab10
