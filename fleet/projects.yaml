@@ -35,6 +35,9 @@ projects:
   meg-foundation-models-review: [lab10]  # 2026-10-28 from laptop ~/code: hyperresearch review of MEG foundation models; source PDFs, DB and session exports in git-annex (lab10 + Drive)
   red-teaming-aaai-paper-private: [lab10]  # 2026-10-28 from laptop ~/code/red-teaming-aaai-paper: agent reviews, references, research vault (paper itself = Overleaf 6a8448997388516ac4f70994); PDFs in git-annex (lab10 + Drive)
   cocodelics-private: [lab10]  # 2026-10-28 from laptop ~/code/sprint: onboarding, Claude memory, sessions, untracked neuro-cocodelics outputs (git-annex, lab10 + Drive); live copies of the onboarding + memory on lab9
+  relationships: [lab10]  # 2026-10-28 from laptop ~/code/mission: personal; every file in git-annex (lab10 + Drive); never publish or deploy
+  convert-to-text: [lab10]  # 2026-10-28 from laptop ~/code/convert-to-text (+ pdf-converter's long-PDF scripts): marker + WhisperX converter
+  horse-eeg: [lab10]  # 2026-10-28 from laptop ~/code/horse-eeg + eeg-bench: BITalino horse EEG pilot; recording and outputs in git-annex (lab10 + Drive)
   gemini-agy-investigation-outputs: [lab10]  # 2026-10-27: git-annex archive of lab8 gemini-agy-investigation-P88aiW/outputs (red-teaming run data, Drive copy); usable or stale: containerized-red-teaming#144
 
   # --- lab: research ---
