@@ -70,6 +70,7 @@ projects:
   gbfb-port: [lab8]
   complex-seizures: [lab8]
   llm-therapy: [lab8]
+  abint-safety: [lab7]  # 2026-10-28 new: Abundant Intelligences, AI trustworthiness + Indigenous AI (hyperresearch review → talk → benchmark); git-annex on gdrive-yjmantilla-annex
 
   # --- undecided: on both hosts today, on different branches/commits ---
   neurodags: [?]

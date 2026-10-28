@@ -53,7 +53,7 @@ hosts:
     ssh: lab7
     tailscale: lkj007-psy
     ip: 100.80.177.26
-    role: research
+    role: research — abint-safety (Abundant Intelligences: AI trustworthiness + Indigenous AI; review, talk, benchmark), since 2026-10-28; /home is SSD. Has ~/.config/serpapi and the gdrive-yjmantilla-annex rclone remote
     spec: Xeon E3-1240 v5 (8 threads), 32 GB RAM, Quadro K620, 405 GB /home, CachyOS
     auth: key+password
     roots: ~/Projects
